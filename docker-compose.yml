@@ -1,0 +1,17 @@
+
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: fozesc_db
+    
+    env_file:
+      - .env
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+
+volumes:
+  postgres_data:
