@@ -1,9 +1,8 @@
 .DS_Store
-.env
 *.env
-backend/.env
-backend/venv/
-backend/__pycache__/
-backend/postgres_data/
+.env
+venv/
+__pycache__/
+postgres_data/
 .idea/
 .vscode/
