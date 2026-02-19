@@ -10,23 +10,31 @@ class BaseRepository:
     def get_by_id(self, id):
         return self.model.query.get(id)
 
+
     def create(self, data):
-        entity = self.model(**data)
+    
+        if isinstance(data, dict):
+            entity = self.model(**data)
+        else:
+   
+            entity = data
+        
         db.session.add(entity)
         db.session.commit()
         return entity
 
-    def update(self, id, data):
-        entity = self.get_by_id(id)
-        if not entity:
-            return None
-        for key, value in data.items():
-            setattr(entity, key, value)
+
+    def update(self, entity):
+
         db.session.commit()
         return entity
 
-    def delete(self, id):
-        entity = self.get_by_id(id)
+    def delete(self, id_or_entity):
+        if isinstance(id_or_entity, int):
+            entity = self.get_by_id(id_or_entity)
+        else:
+            entity = id_or_entity
+        
         if entity:
             db.session.delete(entity)
             db.session.commit()

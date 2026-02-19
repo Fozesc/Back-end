@@ -1,30 +1,28 @@
-from app import ma
-from app.models.domain import Operation, Check
+from flask_marshmallow import Marshmallow
 from marshmallow import fields
+from app.models.domain import Operation
+from app.schemas.check_schema import CheckSchema
 
-class CheckSchema(ma.SQLAlchemyAutoSchema):
-    class Meta:
-        model = Check
-        load_instance = True
-        include_fk = True
+ma = Marshmallow()
 
 class OperationSchema(ma.SQLAlchemyAutoSchema):
-    checks = ma.Nested(CheckSchema, many=True)
-    
     class Meta:
         model = Operation
         load_instance = True
+        include_fk = True
+    
 
-
-class CreateOperationSchema(ma.Schema):
-    client_id = fields.Int(allow_none=True)
-    client_name_snapshot = fields.Str(required=True)
-    operation_date = fields.Date(required=True)
-    taxa_mensal = fields.Float(required=True)
-    dias_compensacao = fields.Int(required=True)
+    total_face_value = fields.Float()
+    total_interest = fields.Float()
+    total_net_value = fields.Float()
+    monthly_rate = fields.Float()
     
    
-    checks = fields.List(fields.Dict(keys=fields.Str(), values=fields.Raw()))
+    total_net = fields.Float(attribute='total_net_value', dump_only=True)
+  
+    
+    checks = fields.Nested(CheckSchema, many=True)
+    operation_date = fields.Date(format='%Y-%m-%d')
 
-create_operation_schema = CreateOperationSchema()
 operation_schema = OperationSchema()
+operations_schema = OperationSchema(many=True)

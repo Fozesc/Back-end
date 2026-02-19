@@ -6,3 +6,8 @@ __pycache__/
 postgres_data/
 .idea/
 .vscode/
+backups/
+
+cheques.xlsx    
+Borderô Fozesc.xlsx  
+create_admin.py

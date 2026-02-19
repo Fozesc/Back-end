@@ -1,113 +1,185 @@
-from app import db
-from app.utils.sanitizer import sanitize_input
-from app.models.domain import Operation, Check, Transaction
 from datetime import datetime
 import math
+from app import db
+from app.models.domain import Operation, Check, Transaction, Client
+from flask_jwt_extended import get_jwt
+from app.services.audit_service import AuditService
+from sqlalchemy import desc
+from sqlalchemy.orm import joinedload
 
 class OperationService:
+    def __init__(self):
+        self.audit = AuditService()
     
     def _calcular_arredondamento_js(self, valor):
         return int((valor * 100) + 0.5) / 100.0
 
-    def calculate_check(self, valor_face, data_base, data_vencimento, taxa, dias_comp):
+    def calculate_check_values(self, valor_face, data_base, data_vencimento, taxa_mensal, dias_flutuacao=0):
         if isinstance(data_base, str):
             data_base = datetime.strptime(data_base, '%Y-%m-%d').date()
         if isinstance(data_vencimento, str):
             data_vencimento = datetime.strptime(data_vencimento, '%Y-%m-%d').date()
             
         diff = (data_vencimento - data_base).days
-        dias_totais = diff + dias_comp
+        dias_totais = diff + int(dias_flutuacao)
+        
+        valor_face = float(valor_face)
+        
         
         if dias_totais <= 0:
-            return 0, 0.0, float(valor_face)
+            return dias_totais, 0.0, valor_face
         
-        taxa_decimal = taxa / 100.0
-        total_mes = dias_totais / 30.0
-        fator = pow(1 + taxa_decimal, total_mes)
+        taxa_decimal = float(taxa_mensal) / 100.0
         
-        valor_presente = float(valor_face)
-        valor_futuro = valor_presente * fator
+
+        total_meses = dias_totais / 30.0
+        fator = math.pow(1 + taxa_decimal, total_meses)
         
-        juros_bruto = valor_futuro - valor_presente
-        juros = self._calcular_arredondamento_js(juros_bruto)
+        valor_liquido_raw = valor_face / fator
+        valor_liquido = self._calcular_arredondamento_js(valor_liquido_raw)
+        valor_juros_final = valor_face - valor_liquido
         
-        liquido = valor_presente - juros
-        
-        return dias_totais, juros, liquido
+        return dias_totais, valor_juros_final, valor_liquido
 
     def create_operation(self, data):
-    
-        clean_data = sanitize_input(data)
+        try:
+            client = Client.query.get(data['client_id'])
+            if not client:
+                raise ValueError("Cliente não encontrado")
 
-       
-        new_operation = Operation(
-            client_id=clean_data.get('client_id'),
-            client_name_snapshot=clean_data['client_name_snapshot'],
-            operation_date=clean_data['operation_date'],
-            applied_rate=clean_data['taxa_mensal'],
-            total_gross=0.0,
-            total_interest=0.0,
-            total_net=0.0
-        )
-        
-        db.session.add(new_operation)
-        db.session.flush() 
+            op_date = data.get('operation_date', datetime.now().date())
+            if isinstance(op_date, str):
+                op_date = datetime.strptime(op_date, '%Y-%m-%d').date()
 
-        total_gross = 0.0
-        total_interest = 0.0
-        total_net = 0.0
-
-
-        for check_data in clean_data['checks']:
-            valor_face = float(check_data['valor'])
-            vencimento = check_data['vencimento']
+            conta_origem = data.get('account_source', 'Dinheiro') 
+            origem_sistema = f"Sistema ({conta_origem})"
             
-           
-            dias, juros, liquido = self.calculate_check(
-                valor_face=valor_face,
-                data_base=new_operation.operation_date,
-                data_vencimento=vencimento,
-                taxa=new_operation.applied_rate,
-                dias_comp=clean_data['dias_compensacao']
+            dias_comp = int(data.get('dias_compensacao', 0))
+
+            new_operation = Operation(
+                client_id=data['client_id'],
+                client_name_snapshot=client.name,
+                operation_date=op_date,
+                monthly_rate=float(data['taxa_mensal']), 
+                compensation_days=dias_comp,
+                account_source=conta_origem,
+                total_face_value=0.0,
+                total_interest=0.0,
+                total_net_value=0.0
             )
             
-            new_check = Check(
-                operation_id=new_operation.id,
-                bank=check_data.get('banco', ''),
-                number=check_data.get('num_doc', ''),
-                due_date=vencimento,
-                amount=valor_face,
-                interest_amount=juros, 
-                net_amount=liquido,    
-                days=dias,
-                status='Aguardando'
+            db.session.add(new_operation)
+            db.session.flush()
+
+            acumulado_face = 0.0
+            acumulado_juros = 0.0
+            acumulado_liquido = 0.0
+            
+            checks_audit_list = []
+
+            for item in data['checks']:
+                valor_face = float(item['valor'])
+                vencimento = item['vencimento']
+                
+                dias, juros, liquido = self.calculate_check_values(
+                    valor_face=valor_face,
+                    data_base=new_operation.operation_date,
+                    data_vencimento=vencimento,
+                    taxa_mensal=new_operation.monthly_rate,
+                    dias_flutuacao=new_operation.compensation_days
+                )
+                
+                new_check = Check(
+                    operation_id=new_operation.id,
+                    bank=item.get('banco', ''),
+                    number=item.get('num_doc', ''),
+                    due_date=datetime.strptime(vencimento, '%Y-%m-%d').date() if isinstance(vencimento, str) else vencimento,
+                    amount=valor_face,
+                    interest_amount=juros, 
+                    net_amount=liquido,    
+                    days=dias,
+                    status='Aguardando',
+                    destination_bank='Carteira',
+                    issuer_name=item.get('emitente', '')
+                )
+                
+                db.session.add(new_check)
+                
+                acumulado_face += valor_face
+                acumulado_juros += juros
+                acumulado_liquido += liquido
+                
+                checks_audit_list.append(f"[{new_check.bank} R$ {new_check.amount:.2f}]")
+
+            new_operation.total_face_value = acumulado_face
+            new_operation.total_interest = acumulado_juros
+            new_operation.total_net_value = acumulado_liquido
+
+            transaction = Transaction(
+                date=new_operation.operation_date,
+                description=f"Pgto Borderô #{new_operation.id} - {client.name}",
+                amount=acumulado_liquido * -1,
+                type='saida',
+                origin=origem_sistema, 
+                category='Compra de Ativos',
+                operation_id=new_operation.id
             )
+            db.session.add(transaction)
+
+            db.session.commit()
+
+            try:
+                claims = get_jwt()
+                user_name = claims.get('name', 'Sistema')
+            except:
+                user_name = 'Sistema'
+
+            resumo_cheques_str = ", ".join(checks_audit_list)
+            detalhes = (
+                f"Novo Borderô #{new_operation.id} criado.\n"
+                f"Cliente: {client.name}\n"
+                f"Taxa: {new_operation.monthly_rate}% | Juros Total: R$ {new_operation.total_interest:.2f}\n"
+                f"Valor Líquido Entregue: R$ {new_operation.total_net_value:.2f}\n"
+                f"Cheques ({len(data['checks'])}): {resumo_cheques_str}"
+            )
+
+            self.audit.log_action(user_name, 'CREATE', 'Borderô', detalhes)
+                
+            return new_operation
+
+        except Exception as e:
+            db.session.rollback()
+            raise e
             
-            db.session.add(new_check)
+    def get_all(self):
+        return Operation.query.all()
+
+    def get_by_client(self, client_id):
+    
+        ops = Operation.query\
+            .filter(Operation.client_id == client_id)\
+            .options(joinedload(Operation.checks))\
+            .order_by(desc(Operation.operation_date))\
+            .all()
             
-            total_gross += valor_face
-            total_interest += juros
-            total_net += liquido
+        return [self._serialize_with_checks(op) for op in ops]
 
-    
-        new_operation.total_gross = total_gross
-        new_operation.total_interest = total_interest
-        new_operation.total_net = total_net
-
-
-        transaction = Transaction(
-            date=new_operation.operation_date,
-            description=f"Borderô #{new_operation.id} - {new_operation.client_name_snapshot}",
-            amount=total_net,
-            type='saida',
-            origin='Sistema (Borderô)',
-            category='Compra de Cheques',
-            operation_id=new_operation.id
-        )
-        db.session.add(transaction)
-
-        
-        db.session.commit()
-        
-    
-        return new_operation
+    def _serialize_with_checks(self, op):
+        return {
+            'id': op.id,
+            'client_id': op.client_id,
+            'date': op.operation_date.strftime('%Y-%m-%d'),
+            'total_face_value': op.total_face_value, 
+            'total_net_value': op.total_net_value,
+            'status': op.status,
+            'notes': op.notes,
+            'cheques': [{
+                'id': c.id,
+                'due_date': c.due_date.strftime('%Y-%m-%d'),
+                'amount': c.amount,
+                'status': c.status,
+                'bank': c.bank,
+                'number': c.number,
+                'issuer_name': c.issuer_name
+            } for c in op.checks]
+        }
