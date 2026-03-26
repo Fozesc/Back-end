@@ -41,6 +41,49 @@ class OperationService:
         
         return dias_totais, valor_juros_final, valor_liquido
 
+    from datetime import datetime
+import math
+from app import db
+from app.models.domain import Operation, Check, Transaction, Client
+from flask_jwt_extended import get_jwt
+from app.services.audit_service import AuditService
+from sqlalchemy import desc
+from sqlalchemy.orm import joinedload
+
+class OperationService:
+    def __init__(self):
+        self.audit = AuditService()
+    
+    def _calcular_arredondamento_js(self, valor):
+        return int((valor * 100) + 0.5) / 100.0
+
+    def calculate_check_values(self, valor_face, data_base, data_vencimento, taxa_mensal, dias_flutuacao=0):
+        if isinstance(data_base, str):
+            data_base = datetime.strptime(data_base, '%Y-%m-%d').date()
+        if isinstance(data_vencimento, str):
+            data_vencimento = datetime.strptime(data_vencimento, '%Y-%m-%d').date()
+            
+        diff = (data_vencimento - data_base).days
+        dias_totais = diff + int(dias_flutuacao)
+        
+        valor_face = float(valor_face)
+        
+        
+        if dias_totais <= 0:
+            return dias_totais, 0.0, valor_face
+        
+        taxa_decimal = float(taxa_mensal) / 100.0
+        
+
+        total_meses = dias_totais / 30.0
+        fator = math.pow(1 + taxa_decimal, total_meses)
+        
+        valor_liquido_raw = valor_face / fator
+        valor_liquido = self._calcular_arredondamento_js(valor_liquido_raw)
+        valor_juros_final = valor_face - valor_liquido
+        
+        return dias_totais, valor_juros_final, valor_liquido
+
     def create_operation(self, data):
         try:
             client = Client.query.get(data['client_id'])
@@ -151,6 +194,39 @@ class OperationService:
             db.session.rollback()
             raise e
             
+    def get_all(self):
+        return Operation.query.all()
+
+    def get_by_client(self, client_id):
+    
+        ops = Operation.query\
+            .filter(Operation.client_id == client_id)\
+            .options(joinedload(Operation.checks))\
+            .order_by(desc(Operation.operation_date))\
+            .all()
+            
+        return [self._serialize_with_checks(op) for op in ops]
+
+    def _serialize_with_checks(self, op):
+        return {
+            'id': op.id,
+            'client_id': op.client_id,
+            'date': op.operation_date.strftime('%Y-%m-%d'),
+            'total_face_value': op.total_face_value, 
+            'total_net_value': op.total_net_value,
+            'status': op.status,
+            'notes': op.notes,
+            'cheques': [{
+                'id': c.id,
+                'due_date': c.due_date.strftime('%Y-%m-%d'),
+                'amount': c.amount,
+                'status': c.status,
+                'bank': c.bank,
+                'number': c.number,
+                'issuer_name': c.issuer_name
+            } for c in op.checks]
+        }
+    
     def get_all(self):
         return Operation.query.all()
 
