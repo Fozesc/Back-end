@@ -5,6 +5,7 @@ from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from sqlalchemy import or_, and_, desc, asc, func
 from datetime import datetime, date
 from flask import request
+
 class CheckService:
     def __init__(self):
         self.audit = AuditService()
@@ -79,7 +80,6 @@ class CheckService:
 
         pagination = query.paginate(page=page, per_page=per_page, error_out=False)
 
-     
         items_serializados = []
         hoje = date.today()
         for c in pagination.items:
@@ -101,7 +101,6 @@ class CheckService:
         ).scalar()
         return {'total_portfolio': total or 0.0}
 
-
     def update_status(self, id, new_status, payment_data=None):
         check = Check.query.get(id)
         if not check: return False
@@ -109,18 +108,56 @@ class CheckService:
         old_status = check.status
         check.status = new_status
         
-        # --- 1. LÓGICA DE PAGAMENTO ---
-        if new_status == 'Pago':
-            if payment_data and payment_data.get('amount'):
-                amount_paid = float(payment_data.get('amount'))
-            else:
-                amount_paid = check.amount
-                
-            method = payment_data.get('method', 'Dinheiro') if payment_data else 'Dinheiro'
+        # 1. Desfazer Pagamento (Se era Pago e mudou pra outra coisa)
+        if old_status == 'Pago' and new_status != 'Pago':
+            check.payment_date = None
+            check.paid_amount = 0.0
             
+            # Procura a transação de recebimento no caixa e deleta
+            prefixo_pgto = f"Recebimento Cheque #{check.number or 'S/N'} - {check.issuer_name}"
+            transacao_pgto = Transaction.query.filter(
+                Transaction.operation_id == check.operation_id,
+                Transaction.category == 'Recebimento de Cheque',
+                Transaction.description.like(f"{prefixo_pgto}%")
+            ).first()
+            
+            if transacao_pgto:
+                db.session.delete(transacao_pgto)
+
+        # 2. Desfazer Devolução (Se era Devolvido e mudou pra outra coisa)
+        if old_status == 'Devolvido' and new_status != 'Devolvido':
+            check.fine_amount = 0.0
+            
+            # Procura a transação da multa no caixa e deleta
+            prefixo_multa = f"Multa Devolução Cheque #{check.number or 'S/N'} - {check.issuer_name}"
+            transacao_multa = Transaction.query.filter(
+                Transaction.operation_id == check.operation_id,
+                Transaction.category == 'Multas e Juros',
+                Transaction.description.like(f"{prefixo_multa}%")
+            ).first()
+            
+            if transacao_multa:
+                db.session.delete(transacao_multa)
+
+        # --- LÓGICA DE NOVO PAGAMENTO ---
+        if new_status == 'Pago' and old_status != 'Pago':
+        
+            method = 'Dinheiro'
+            amount_paid = float(check.amount)
+            
+            try:
+                req_data = request.get_json(silent=True)
+                if req_data and 'payment_data' in req_data:
+                    if 'method' in req_data['payment_data']:
+                        method = req_data['payment_data']['method']
+                    if 'amount' in req_data['payment_data']:
+                        amount_paid = float(req_data['payment_data']['amount'])
+            except Exception as e:
+                print(f"Erro ao ler método de pagamento: {e}")
+                
             check.payment_date = datetime.now().date()
             check.paid_amount = amount_paid
-            check.payment_method = method
+            check.payment_method = method 
 
             desc_tx = f"Recebimento Cheque #{check.number or 'S/N'} - {check.issuer_name}"
             transacao = Transaction(
@@ -134,47 +171,39 @@ class CheckService:
             )
             db.session.add(transacao)
         
-        # --- 2. LÓGICA DE CHEQUE DEVOLVIDO ---
+        # --- LÓGICA DE NOVO CHEQUE DEVOLVIDO ---
         elif new_status == 'Devolvido' and old_status != 'Devolvido':
             taxa_multa = 2.0
+            method = 'Dinheiro' # Valor padrão caso venha vazio
             
-            # --- O PULO DO GATO: Intercepta a requisição HTTP direto do Vue.js ---
             try:
-                # Puxa o JSON original que o frontend enviou, ignorando o controlador
                 req_data = request.get_json(silent=True)
-                if req_data and 'taxa_multa' in req_data:
-                    taxa_multa = float(req_data['taxa_multa'])
+                if req_data and 'payment_data' in req_data:
+                    if 'taxa_multa' in req_data['payment_data']:
+                        taxa_multa = float(req_data['payment_data']['taxa_multa'])
+                    if 'method' in req_data['payment_data']:
+                        method = req_data['payment_data']['method'] # <-- Pega BB, PIX, etc.
             except Exception as e:
-                print(f"Não conseguiu ler a taxa enviada, usando 2%. Erro: {e}")
-            # ----------------------------------------------------------------------
+                print(f"Erro ao ler taxa/método: {e}")
 
-            # Calcula a multa sobre o valor de face
             multa_calculada = float(check.amount) * (taxa_multa / 100.0)
             check.fine_amount = multa_calculada
 
-            # Lança APENAS a multa como entrada no Caixa
             desc_tx = f"Multa Devolução Cheque #{check.number or 'S/N'} - {check.issuer_name} ({taxa_multa}%)"
             transacao = Transaction(
                 date=datetime.now(),
                 description=desc_tx[:200],
                 amount=multa_calculada, 
                 type='entrada',
-                origin='Sistema', 
+                origin=method, 
                 category='Multas e Juros',
                 operation_id=check.operation_id
             )
             db.session.add(transacao)
-        
-        # --- 3. LÓGICA DE ESTORNO ---
-        elif old_status == 'Pago' and new_status != 'Pago':
-            check.payment_date = None
-            check.paid_amount = 0.0
-            
-        db.session.commit()
 
+        db.session.commit()
         self.audit.log_action(self._get_current_user(), 'UPDATE', 'Cheque', f"Status alterado: {old_status} -> {new_status}")
         return check
-
 
     def prorrogate_check(self, check_id, new_date_str, fee_amount, notes):
         check = Check.query.get(check_id)
@@ -188,6 +217,14 @@ class CheckService:
                 check.original_due_date = old_date
 
             fee_amount_float = float(fee_amount) if fee_amount else 0.0
+
+            method = 'Dinheiro'
+            try:
+                req_data = request.get_json(silent=True)
+                if req_data and 'method' in req_data:
+                    method = req_data['method']
+            except:
+                pass
 
             extension = CheckExtension(
                 check_id=check.id,
@@ -208,7 +245,7 @@ class CheckService:
                     description=desc_tx[:200],
                     amount=fee_amount_float,
                     type='entrada',
-                    origin='Sistema',
+                    origin=method,
                     category='Multas e Juros',
                     operation_id=check.operation_id
                 )
@@ -233,43 +270,60 @@ class CheckService:
         return True
 
     def _serialize_check(self, c):
-        client_name = c.operation.client.name if c.operation and c.operation.client else "N/A"
-        data_entrada = c.operation.operation_date.strftime('%Y-%m-%d') if c.operation else None
-        
-        extensions_history = []
-        if hasattr(c, 'extensions'):
-            for ext in c.extensions:
-                extensions_history.append({
-                    'id': ext.id,
-                    'data_simulacao': ext.prorrogation_date.strftime('%Y-%m-%d'),
-                    'de': ext.old_due_date.strftime('%Y-%m-%d'),
-                    'para': ext.new_due_date.strftime('%Y-%m-%d'),
-                    'dias': ext.days_added,
-                    'taxa': ext.fee_amount
-                })
+        forma_devolucao = None
+        if c.status == 'Devolvido':
+            tx_dev = Transaction.query.filter(
+                Transaction.operation_id == c.operation_id,
+                Transaction.category == 'Multas e Juros',
+                Transaction.description.like("Multa Devolução%")
+            ).order_by(Transaction.id.desc()).first()
+            if tx_dev:
+                forma_devolucao = tx_dev.origin
 
         return {
             'id': c.id,
             'operation_id': c.operation_id,
-            'type': c.type or 'Cheque', 
-            
-            'vencimento': c.due_date.strftime('%Y-%m-%d'),
-            'vencimento_original': c.original_due_date.strftime('%Y-%m-%d') if c.original_due_date else None,
-            'data_entrada': data_entrada,
-            'data_pagamento': c.payment_date.strftime('%Y-%m-%d') if c.payment_date else None,
-            
-            'valor_bruto': c.amount,
-            'valor_pago': c.paid_amount, 
-            'valor_liquido': c.net_amount,
-            'juros': c.interest_amount,
-            
-            'cliente': client_name,
-            'emitente': c.issuer_name,
-            'banco': c.bank,
-            'num_doc': c.number,
-            'status': c.status,
-            'destino': c.destination_bank,
-            'observacao': c.operation.notes if c.operation else '',
-            
-            'historico_prorrogacao': extensions_history
+            'numero': getattr(c, 'number', ''),
+            'banco': getattr(c, 'bank', ''),
+            # O PULO DO GATO: Tenta ler 'num_doc', se não achar tenta 'document_number', se não achar usa string vazia
+            'num_doc': getattr(c, 'num_doc', getattr(c, 'document_number', getattr(c, 'document', ''))),
+            'valor_bruto': float(c.amount) if getattr(c, 'amount', None) else 0.0,
+            'valor_liquido': float(c.net_amount) if getattr(c, 'net_amount', None) else float(getattr(c, 'amount', 0.0)),
+            'juros': float(c.fee_amount) if getattr(c, 'fee_amount', None) else 0.0,
+            'emissao': c.issue_date.strftime('%Y-%m-%d') if getattr(c, 'issue_date', None) else None,
+            'vencimento': c.due_date.strftime('%Y-%m-%d') if getattr(c, 'due_date', None) else None,
+            'vencimento_original': c.original_due_date.strftime('%Y-%m-%d') if getattr(c, 'original_due_date', None) else None,
+            'data_entrada': c.created_at.strftime('%Y-%m-%d') if getattr(c, 'created_at', None) else None,
+            'data_pagamento': c.payment_date.strftime('%Y-%m-%d') if getattr(c, 'payment_date', None) else None,
+            'valor_pago': float(c.paid_amount) if getattr(c, 'paid_amount', None) else 0.0,
+            'forma_pagamento': getattr(c, 'payment_method', None),
+            'forma_devolucao': forma_devolucao,
+            'cliente': c.operation.client.name if getattr(c, 'operation', None) and c.operation.client else 'Sem Cliente',
+            'emitente': getattr(c, 'issuer_name', ''),
+            'status': getattr(c, 'status', ''),
+            'observacao': getattr(c, 'notes', ''),
+            'historico_prorrogacao': [self._serialize_extension(e) for e in getattr(c, 'extensions', [])]
+        }
+
+    def _serialize_extension(self, e):
+        tx_prorrog = Transaction.query.filter(
+            Transaction.operation_id == e.check.operation_id,
+            Transaction.category == 'Multas e Juros',
+            Transaction.amount == e.fee_amount,
+            Transaction.description.like("Taxa Prorrogação%")
+        ).order_by(Transaction.id.desc()).first()
+        
+        metodo = tx_prorrog.origin if tx_prorrog else 'Dinheiro'
+
+        # O Pulo do gato: Tenta usar created_at, se não tiver, usa a old_due_date, se não tiver, usa a data de hoje
+        data_simulacao = getattr(e, 'created_at', getattr(e, 'old_due_date', datetime.now()))
+
+        return {
+            'id': e.id,
+            'data_simulacao': data_simulacao.strftime('%Y-%m-%d') if data_simulacao else None,
+            'de': e.old_due_date.strftime('%Y-%m-%d') if e.old_due_date else None,
+            'para': e.new_due_date.strftime('%Y-%m-%d') if e.new_due_date else None,
+            'dias': e.days_added,
+            'taxa': float(e.fee_amount),
+            'forma_pagamento': metodo 
         }

@@ -56,11 +56,13 @@ class TransactionService:
         }
 
     def get_balances(self):
+        from app.models.domain import CompanySettings, Transaction # Garantindo os imports
         settings = CompanySettings.query.first()
         
         bb_total = settings.saldo_inicial_bb if settings else 0.0
         ce_total = settings.saldo_inicial_ce if settings else 0.0
         dinheiro_total = settings.saldo_inicial_caixa if settings else 0.0
+        pix_total = 0.0 # Nova conta para o PIX
         capital = settings.capital_social if settings else 0.0
         
         transacoes = Transaction.query.all()
@@ -73,21 +75,24 @@ class TransactionService:
             multiplicador = 1 if 'entrada' in tipo else -1
             valor_real = valor * multiplicador
             
+            # Separação exata das contas
             if 'BRASIL' in origem or 'BB' in origem:
                 bb_total += valor_real
             elif 'CAIXA' in origem or 'CEF' in origem:
                 ce_total += valor_real
+            elif 'PIX' in origem:
+                pix_total += valor_real
             else:
-                dinheiro_total += valor_real
+                dinheiro_total += valor_real # Se não for nenhum dos 3, é dinheiro físico
 
         return {
-            'total': bb_total + ce_total + dinheiro_total,
+            'total': bb_total + ce_total + dinheiro_total + pix_total,
             'bb': bb_total,
             'caixa': ce_total,
+            'pix': pix_total,
             'dinheiro': dinheiro_total,
             'capital_investido': capital
         }
-
     def create(self, data):
         val = data.get('amount')
         if val is None: val = data.get('valor')
