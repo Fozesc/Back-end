@@ -74,3 +74,22 @@ def delete(id):
     if service.delete(id):
         return jsonify({'message': 'Cheque removido'})
     return jsonify({'error': 'Erro ao remover'}), 400
+
+@bp.route('', methods=['POST'], strict_slashes=False)
+@bp.route('/', methods=['POST'], strict_slashes=False)
+@jwt_required()
+def create_check():
+    data = request.get_json()
+    success, result = service.create(data)
+    if success:
+        return jsonify(result), 201
+    return jsonify({'error': result}), 400
+
+@bp.route('/<int:id>', methods=['PUT'], strict_slashes=False)
+@jwt_required()
+def update_check(id):
+    data = request.get_json()
+    success, result = service.update(id, data)
+    if success:
+        return jsonify(result), 200
+    return jsonify({'error': result}), 400
