@@ -8,14 +8,12 @@ service = TransactionService()
 @bp.route('', methods=['GET'])
 @jwt_required()
 def index():
-
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 20, type=int)
     search = request.args.get('search', '', type=str)
     date = request.args.get('date', '', type=str) or None
     tipo = request.args.get('type', 'todos', type=str)
     
-   
     data = service.get_paginated(page, per_page, search, date, tipo)
     return jsonify(data)
 
@@ -30,14 +28,24 @@ def create():
     data = request.json
     return jsonify(service.create(data)), 201
 
+# --- ROTA QUE ESTAVA FALTANDO PARA EDITAR LANÇAMENTO ---
 @bp.route('/<int:id>', methods=['PUT'])
 @jwt_required()
-def update(id):
-    data = request.json
+def update_transaction(id):
+    data = request.get_json()
     result = service.update(id, data)
     if result:
-        return jsonify(result)
-    return jsonify({'error': 'Erro ao atualizar'}), 400
+        return jsonify(result), 200
+    return jsonify({"error": "Lançamento não encontrado"}), 404
+
+# --- ROTA DE SALDOS INICIAIS (MANTIDA) ---
+@bp.route('/initial-balances', methods=['PUT'])
+@jwt_required()
+def update_initial_balances():
+    data = request.get_json()
+    if service.update_initial_balances(data):
+        return jsonify({"message": "Saldos iniciais salvos com sucesso"}), 200
+    return jsonify({"error": "Falha ao salvar saldos"}), 400
 
 @bp.route('/<int:id>', methods=['DELETE'])
 @jwt_required()

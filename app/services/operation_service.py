@@ -106,6 +106,7 @@ class OperationService:
                 monthly_rate=float(data['taxa_mensal']), 
                 compensation_days=dias_comp,
                 account_source=conta_origem,
+                notes=data.get('notes'),
                 total_face_value=0.0,
                 total_interest=0.0,
                 total_net_value=0.0
