@@ -48,42 +48,57 @@ class TransactionService:
             return False
 
     def get_balances(self):
-        # 1. Busca os pontos de partida (Saldos Iniciais)
+        from app.models.domain import CompanySettings, Transaction
+        
+        # 1. Busca os dados de configuração (Modal de Saldos Iniciais)
         settings = CompanySettings.query.first()
         
-        bb_total = settings.saldo_inicial_bb if settings else 0.0
-        ce_total = settings.saldo_inicial_ce if settings else 0.0
-        dinheiro_total = settings.saldo_inicial_caixa if settings else 0.0
-        capital = settings.capital_social if settings else 0.0
+        # O Capital Total agora é EXATAMENTE o que você digitou no campo Capital Social
+        capital_total_fixo = settings.capital_social if settings else 0.0
         
-        # 2. Soma toda a movimentação histórica
+        # Ponto de partida das contas bancárias
+        ini_bb = settings.saldo_inicial_bb if settings else 0.0
+        ini_ce = settings.saldo_inicial_ce if settings else 0.0
+        ini_caixa = settings.saldo_inicial_caixa if settings else 0.0
+        
+        # 2. MOVIMENTAÇÃO REAL (Entradas e Saídas do Fluxo de Caixa)
         transacoes = Transaction.query.all()
+        bb_mov = 0.0
+        ce_mov = 0.0
+        caixa_mov = 0.0
 
         for t in transacoes:
-            valor = float(t.amount) if t.amount is not None else 0.0
+            valor = float(t.amount or 0)
             tipo = (t.type or "").lower().strip()
             origem = (t.origin or "").upper().strip()
 
             multiplicador = 1 if 'entrada' in tipo else -1
             valor_real = valor * multiplicador
             
-            # Lógica de unificação: Se for BB ou Caixa, vai pra conta específica. 
-            # Qualquer outra coisa (PIX, Dinheiro, etc) cai no monte do Dinheiro.
+            # Lógica de contas (PIX unificado com Dinheiro)
             if 'BRASIL' in origem or 'BB' in origem:
-                bb_total += valor_real
+                bb_mov += valor_real
             elif 'CAIXA' in origem or 'CEF' in origem:
-                ce_total += valor_real
+                ce_mov += valor_real
             else:
-                dinheiro_total += valor_real
+                caixa_mov += valor_real
+
+        # 3. RESULTADO FINAL
+        
+        # Saldo Disponível (Calculado: Inicial + Movimentação)
+        bb_atual = ini_bb + bb_mov
+        ce_atual = ini_ce + ce_mov
+        caixa_atual = ini_caixa + caixa_mov
+        disponivel_total = bb_atual + ce_atual + caixa_atual
 
         return {
-            'total': bb_total + ce_total + dinheiro_total,
-            'bb': bb_total,
-            'caixa': ce_total,
-            'dinheiro': dinheiro_total, # Unificado com PIX visualmente no front
-            'capital_investido': capital
+            'total': disponivel_total,      # Card Azul (Saldo Disponível)
+            'bb': bb_atual,
+            'caixa': ce_atual,
+            'dinheiro': caixa_atual,
+            'capital_total': capital_total_fixo, # Card Branco (Fixo do Modal)
+            'capital_investido': capital_total_fixo
         }
-
     # --- RESTANTE DAS FUNÇÕES (Mantidas originais para não estragar nada) ---
     
     def get_paginated(self, page, per_page, search=None, date_filter=None, type_filter=None):
