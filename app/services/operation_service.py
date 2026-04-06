@@ -8,6 +8,13 @@ from sqlalchemy import desc
 from sqlalchemy.orm import joinedload
 
 class OperationService:
+
+    def _get_current_user(self):
+        try:
+            return get_jwt().get('name', 'Sistema')
+        except:
+            return 'Sistema'
+            
     def __init__(self):
         self.audit = AuditService()
     
@@ -260,3 +267,4 @@ class OperationService:
                 'issuer_name': c.issuer_name
             } for c in op.checks]
         }
+        

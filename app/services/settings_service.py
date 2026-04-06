@@ -1,7 +1,17 @@
 from app.models.domain import CompanySettings
 from app import db
-
+from app.services.audit_service import AuditService
 class SettingsService:
+
+    def __init__(self):
+        self.audit = AuditService()
+
+    def _get_current_user(self):
+        try:
+            return get_jwt().get('name', 'Sistema')
+        except:
+            return 'Sistema'
+
     def get_settings(self):
       
         settings = CompanySettings.query.first()
@@ -22,20 +32,42 @@ class SettingsService:
             settings = CompanySettings()
             db.session.add(settings)
        
-        if 'nomeEmpresa' in data: settings.company_name = data['nomeEmpresa']
-        if 'cnpj' in data: settings.cnpj = data['cnpj']
-        if 'telefone' in data: settings.phone = data['telefone']
-        if 'endereco' in data: settings.address = data['endereco']
-        
-        if 'taxaPadrao' in data: settings.default_monthly_rate = float(data['taxaPadrao'])
-        if 'diasCompensacaoPadrao' in data: settings.default_compensation_days = int(data['diasCompensacaoPadrao'])
-        
-    
-        if 'iof_rate' in data: settings.iof_rate = float(data['iof_rate'])
-        if 'extension_rate' in data: settings.extension_rate = float(data['extension_rate'])
-        if 'fine_rate' in data: settings.fine_rate = float(data['fine_rate'])
+       
+        mudancas = []
+
+   
+        campos = {
+            'nomeEmpresa': ('Nome', 'company_name'),
+            'cnpj': ('CNPJ', 'cnpj'),
+            'telefone': ('Telefone', 'phone'),
+            'endereco': ('Endereço', 'address'),
+            'taxaPadrao': ('Taxa Mensal', 'default_monthly_rate'),
+            'diasCompensacaoPadrao': ('Dias Comp.', 'default_compensation_days'),
+            'iof_rate': ('IOF', 'iof_rate'),
+            'extension_rate': ('Juros Prorrogação', 'extension_rate'),
+            'fine_rate': ('Multa Devolução', 'fine_rate')
+        }
+
+        for chave_json, (label, atributo) in campos.items():
+            if chave_json in data:
+                valor_novo = data[chave_json]
+                valor_antigo = getattr(settings, atributo)
+
+             
+                if isinstance(valor_antigo, float): valor_novo = float(valor_novo)
+                if isinstance(valor_antigo, int): valor_novo = int(valor_novo)
+
+                if valor_novo != valor_antigo:
+                    mudancas.append(f"{label}: {valor_antigo} -> {valor_novo}")
+                    setattr(settings, atributo, valor_novo)
 
         db.session.commit()
+
+   
+        if mudancas:
+            resumo = "Alterou: " + " | ".join(mudancas)
+            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Configuracao', resumo)
+        
         return self._serialize(settings)
 
     def _serialize(self, s):

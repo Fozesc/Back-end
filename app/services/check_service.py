@@ -36,9 +36,9 @@ class CheckService:
                 notes=data.get('observacao')
             )
             db.session.add(nova_operacao)
-            db.session.flush() # Pega o ID provisório da operação
+            db.session.flush()
             
-            # 2. Cria o Cheque
+          
             novo_cheque = Check(
                 operation_id=nova_operacao.id,
                 bank=data.get('banco'),
@@ -53,7 +53,7 @@ class CheckService:
             )
             db.session.add(novo_cheque)
             
-            # 3. Lança a SAÍDA no Caixa
+           
             if conta_saida and amount > 0:
                 desc_tx = f"Empréstimo Cheque #{novo_cheque.number or 'S/N'} - {novo_cheque.issuer_name}"
                 transacao = Transaction(
@@ -82,7 +82,7 @@ class CheckService:
         if not check: return False, "Cheque não encontrado"
         
         try:
-            # Atualiza os dados do Cheque
+          
             if 'valor' in data:
                 check.amount = float(data['valor'])
                 check.net_amount = float(data['valor'])
@@ -92,7 +92,7 @@ class CheckService:
             if 'num_doc' in data: check.number = data['num_doc']
             if 'emitente' in data: check.issuer_name = data['emitente']
             
-            # Atualiza a observação que fica na Operação vinculada
+            
             if 'observacao' in data and check.operation:
                 check.operation.notes = data['observacao']
             
@@ -195,12 +195,12 @@ class CheckService:
         old_status = check.status
         check.status = new_status
         
-        # 1. Desfazer Pagamento (Se era Pago e mudou pra outra coisa)
+        
         if old_status == 'Pago' and new_status != 'Pago':
             if hasattr(check, 'payment_date'): check.payment_date = None
             if hasattr(check, 'paid_amount'): check.paid_amount = 0.0
             
-            # Procura a transação de recebimento no caixa e deleta
+            
             prefixo_pgto = f"Recebimento Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')}"
             transacao_pgto = Transaction.query.filter(
                 Transaction.operation_id == check.operation_id,
@@ -211,11 +211,10 @@ class CheckService:
             if transacao_pgto:
                 db.session.delete(transacao_pgto)
 
-        # 2. Desfazer Devolução (Se era Devolvido e mudou pra outra coisa)
         if old_status == 'Devolvido' and new_status != 'Devolvido':
             if hasattr(check, 'fine_amount'): check.fine_amount = 0.0
             
-            # Procura a transação da multa no caixa e deleta
+    
             prefixo_multa = f"Multa Devolução Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')}"
             transacao_multa = Transaction.query.filter(
                 Transaction.operation_id == check.operation_id,
@@ -261,7 +260,7 @@ class CheckService:
         # --- LÓGICA DE NOVO CHEQUE DEVOLVIDO ---
         elif new_status == 'Devolvido' and old_status != 'Devolvido':
             taxa_multa = 2.0
-            method = 'Dinheiro' # Valor padrão caso venha vazio
+            method = 'Dinheiro' 
             
             try:
                 req_data = request.get_json(silent=True)
@@ -269,7 +268,7 @@ class CheckService:
                     if 'taxa_multa' in req_data['payment_data']:
                         taxa_multa = float(req_data['payment_data']['taxa_multa'])
                     if 'method' in req_data['payment_data']:
-                        method = req_data['payment_data']['method'] # <-- Pega BB, PIX, etc.
+                        method = req_data['payment_data']['method'] 
             except Exception as e:
                 print(f"Erro ao ler taxa/método: {e}")
 
@@ -289,7 +288,15 @@ class CheckService:
             db.session.add(transacao)
 
         db.session.commit()
-        self.audit.log_action(self._get_current_user(), 'UPDATE', 'Cheque', f"Status alterado: {old_status} -> {new_status}")
+
+        acao = 'BAIXA' if new_status == 'Pago' else 'UPDATE'
+        detalhes = f"Cheque #{check.number} ({check.issuer_name}): {old_status} -> {new_status}"
+        if new_status == 'Pago': detalhes += f" | Recebido: R$ {check.paid_amount}"
+        if new_status == 'Devolvido': detalhes += f" | Multa: R$ {check.fine_amount}"
+        
+        self.audit.log_action(self._get_current_user(), acao, 'Cheque', detalhes)
+
+        
         return check
 
     def prorrogate_check(self, check_id, new_date_str, fee_amount, notes):
@@ -324,7 +331,7 @@ class CheckService:
             )
             db.session.add(extension)
 
-            # --- LANÇA A TAXA DE PRORROGAÇÃO COMO ENTRADA NO CAIXA ---
+ 
             if fee_amount_float > 0:
                 desc_tx = f"Taxa Prorrogação Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')}"
                 transacao = Transaction(
@@ -354,10 +361,11 @@ class CheckService:
         if not check: return False
         db.session.delete(check)
         db.session.commit()
+        self.audit.log_action(self._get_current_user(), 'DELETE', 'Cheque', f"Excluiu permanentemente: {info}")
         return True
 
     def _serialize_check(self, c):
-        # 1. Define a observação buscando da operação vinculada
+
         obs_da_operacao = ""
         if hasattr(c, 'operation') and c.operation:
             obs_da_operacao = getattr(c.operation, 'notes', '')
@@ -373,7 +381,7 @@ class CheckService:
             if tx_dev:
                 forma_devolucao = tx_dev.origin
 
-        # 3. Retorna o dicionário completo e blindado
+
         return {
             'id': c.id,
             'operation_id': c.operation_id,

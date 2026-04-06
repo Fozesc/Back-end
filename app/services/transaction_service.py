@@ -11,12 +11,12 @@ class TransactionService:
 
     def _get_current_user(self):
         try:
-            verify_jwt_in_request(optional=True)
-            return get_jwt_identity() or 'Sistema'
+
+            from flask_jwt_extended import get_jwt
+            return get_jwt().get('name', 'Sistema')
         except:
             return 'Sistema'
 
-    # --- NOVA FUNÇÃO: SALVAR SALDOS INICIAIS ---
     def update_initial_balances(self, data):
         """
         Esta função grava na tabela CompanySettings os valores que servirão 
@@ -139,6 +139,8 @@ class TransactionService:
         )
         db.session.add(new_t)
         db.session.commit()
+        self.audit.log_action(self._get_current_user(), 'CREATE', 'FluxoCaixa', 
+                             f"Lançamento: {new_t.description} | R$ {new_t.amount} ({new_t.origin})")
         return self._serialize(new_t)
 
     def update(self, id, data):
@@ -156,6 +158,8 @@ class TransactionService:
         if 'origin' in data: t.origin = data['origin']
         elif 'origem' in data: t.origin = data['origem']
         db.session.commit()
+        self.audit.log_action(self._get_current_user(), 'UPDATE', 'FluxoCaixa', 
+                             f"Editou lançamento #{id}: {antiga_desc} (R$ {antigo_valor}) -> {t.description} (R$ {t.amount})")
         return self._serialize(t)
     
     def delete(self, id):
@@ -163,6 +167,7 @@ class TransactionService:
         if not t: return False
         db.session.delete(t)
         db.session.commit()
+        self.audit.log_action(self._get_current_user(), 'DELETE', 'FluxoCaixa', f"Apagou lançamento: {info}")
         return True
 
     def _serialize(self, t):

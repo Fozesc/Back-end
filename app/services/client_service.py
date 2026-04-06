@@ -10,8 +10,8 @@ class ClientService:
 
     def _get_current_user(self):
         try:
-            verify_jwt_in_request(optional=True)
-            return get_jwt_identity() or 'Sistema'
+            from flask_jwt_extended import get_jwt
+            return get_jwt().get('name', 'Sistema')
         except:
             return 'Sistema'
 
