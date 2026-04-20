@@ -1,6 +1,7 @@
 from app.models.domain import CompanySettings
 from app import db
 from app.services.audit_service import AuditService
+from flask_jwt_extended import get_jwt
 class SettingsService:
 
     def __init__(self):
@@ -8,6 +9,7 @@ class SettingsService:
 
     def _get_current_user(self):
         try:
+       
             return get_jwt().get('name', 'Sistema')
         except:
             return 'Sistema'

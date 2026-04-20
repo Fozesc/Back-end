@@ -3,7 +3,9 @@ from app import db
 from app.services.audit_service import AuditService
 from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from sqlalchemy import func, or_
-from datetime import datetime, date
+from sqlalchemy import func, case, or_
+import datetime 
+from datetime import datetime, date 
 
 class TransactionService:
     def __init__(self):
@@ -28,7 +30,7 @@ class TransactionService:
                 settings = CompanySettings()
                 db.session.add(settings)
 
-            # Mapeia os campos vindos do Modal de Configuração
+
             if 'capital_social' in data:
                 settings.capital_social = float(data.get('capital_social', 0))
             if 'saldo_inicial_bb' in data:
@@ -47,60 +49,75 @@ class TransactionService:
             print(f"Erro ao salvar saldos iniciais: {e}")
             return False
 
+
+
+
     def get_balances(self):
-        from app.models.domain import CompanySettings, Transaction
+        from app.models.domain import CompanySettings, Transaction, Check
+        from sqlalchemy import func, case
         
-        # 1. Busca os dados de configuração (Modal de Saldos Iniciais)
         settings = CompanySettings.query.first()
         
-        # O Capital Total agora é EXATAMENTE o que você digitou no campo Capital Social
-        capital_total_fixo = settings.capital_social if settings else 0.0
-        
-        # Ponto de partida das contas bancárias
-        ini_bb = settings.saldo_inicial_bb if settings else 0.0
-        ini_ce = settings.saldo_inicial_ce if settings else 0.0
-        ini_caixa = settings.saldo_inicial_caixa if settings else 0.0
-        
-        # 2. MOVIMENTAÇÃO REAL (Entradas e Saídas do Fluxo de Caixa)
-        transacoes = Transaction.query.all()
-        bb_mov = 0.0
-        ce_mov = 0.0
-        caixa_mov = 0.0
+        # 1. Capital Social (Para controle de crescimento/porcentagem)
+        capital_base = float(settings.capital_social or 0)
 
-        for t in transacoes:
-            valor = float(t.amount or 0)
-            tipo = (t.type or "").lower().strip()
-            origem = (t.origin or "").upper().strip()
+       # Dentro de get_balances no transaction_service.py
 
-            multiplicador = 1 if 'entrada' in tipo else -1
-            valor_real = valor * multiplicador
+
+        movimentacoes = db.session.query(
+            Transaction.origin,
+            func.sum(
+                case(
+                    (Transaction.type == 'entrada', func.abs(Transaction.amount)),
+                    else_=-func.abs(Transaction.amount)
+                )
+            )
+        ).group_by(Transaction.origin).all()
+
+        saldos_brutos = {'BRASIL': 0.0, 'CAIXA': 0.0, 'DINHEIRO': 0.0}
+
+        for origem, valor in movimentacoes:
+            orig_upper = (origem or "").upper()
+            val_float = float(valor or 0)
             
-            # Lógica de contas (PIX unificado com Dinheiro)
-            if 'BRASIL' in origem or 'BB' in origem:
-                bb_mov += valor_real
-            elif 'CAIXA' in origem or 'CEF' in origem:
-                ce_mov += valor_real
+            # Mapeamento para garantir que SISTEMA (BB) e BB caiam no mesmo lugar
+            if 'BRASIL' in orig_upper or 'BB' in orig_upper:
+                saldos_brutos['BRASIL'] += val_float
+            elif 'CAIXA' in orig_upper or 'CEF' in orig_upper:
+                saldos_brutos['CAIXA'] += val_float
             else:
-                caixa_mov += valor_real
+                saldos_brutos['DINHEIRO'] += val_float
 
-        # 3. RESULTADO FINAL
-        
-        # Saldo Disponível (Calculado: Inicial + Movimentação)
-        bb_atual = ini_bb + bb_mov
-        ce_atual = ini_ce + ce_mov
-        caixa_atual = ini_caixa + caixa_mov
-        disponivel_total = bb_atual + ce_atual + caixa_atual
+        # 3. Resultado formatado para o Front
+        res_bruto = {
+            'bb_total': round(saldos_brutos['BRASIL'], 2),
+            'caixa_total': round(saldos_brutos['CAIXA'], 2),
+            'dinheiro_total': round(saldos_brutos['DINHEIRO'], 2),
+            'capital_total': capital_base
+        }
+
+        # 4. Cheques na rua (para o cálculo do disponível)
+        cheques_na_rua = db.session.query(
+            Check.bank, 
+            func.sum(Check.amount)
+        ).filter(Check.status.in_(['Aguardando', 'Atrasado'])).group_by(Check.bank).all()
+
+        na_rua_map = {'BRASIL': 0.0, 'CAIXA': 0.0, 'DINHEIRO': 0.0}
+        for banco, valor in cheques_na_rua:
+            b_upper = (banco or "").upper()
+            if 'BRASIL' in b_upper or 'BB' in b_upper:
+                na_rua_map['BRASIL'] += float(valor)
+            elif 'CAIXA' in b_upper or 'CEF' in b_upper:
+                na_rua_map['CAIXA'] += float(valor)
+            else:
+                na_rua_map['DINHEIRO'] += float(valor)
 
         return {
-            'total': disponivel_total,      # Card Azul (Saldo Disponível)
-            'bb': bb_atual,
-            'caixa': ce_atual,
-            'dinheiro': caixa_atual,
-            'capital_total': capital_total_fixo, # Card Branco (Fixo do Modal)
-            'capital_investido': capital_total_fixo
+            'bruto': res_bruto,
+            'na_rua': na_rua_map,
+            'capital_total': capital_base
         }
-    # --- RESTANTE DAS FUNÇÕES (Mantidas originais para não estragar nada) ---
-    
+
     def get_paginated(self, page, per_page, search=None, date_filter=None, type_filter=None):
         db.session.query(Transaction).filter(
             or_(Transaction.amount == None, Transaction.date == None)
@@ -146,28 +163,52 @@ class TransactionService:
     def update(self, id, data):
         t = Transaction.query.get(id)
         if not t: return None
+        
+        # --- ADICIONE ESTAS DUAS LINHAS AQUI ---
+        antiga_desc = t.description
+        antigo_valor = t.amount
+        # ---------------------------------------
+
         if 'date' in data or 'data' in data:
             dt = data.get('date') or data.get('data')
             t.date = datetime.strptime(dt[:10], '%Y-%m-%d').date() if isinstance(dt, str) else dt
+            
         if 'description' in data: t.description = data['description']
         elif 'descricao' in data: t.description = data['descricao']
+        
         val = data.get('amount') or data.get('valor')
         if val is not None: t.amount = float(val)
+        
         if 'type' in data: t.type = data['type']
         elif 'tipo' in data: t.type = data['tipo']
+        
         if 'origin' in data: t.origin = data['origin']
         elif 'origem' in data: t.origin = data['origem']
+        
         db.session.commit()
+        
+        # Agora o log vai funcionar porque as variáveis existem!
         self.audit.log_action(self._get_current_user(), 'UPDATE', 'FluxoCaixa', 
                              f"Editou lançamento #{id}: {antiga_desc} (R$ {antigo_valor}) -> {t.description} (R$ {t.amount})")
         return self._serialize(t)
     
     def delete(self, id):
         t = Transaction.query.get(id)
-        if not t: return False
+        if not t: 
+            return False
+        
+        info = f"{t.description} (R$ {t.amount})"
+        
         db.session.delete(t)
         db.session.commit()
-        self.audit.log_action(self._get_current_user(), 'DELETE', 'FluxoCaixa', f"Apagou lançamento: {info}")
+        
+      
+        self.audit.log_action(
+            self._get_current_user(), 
+            'DELETE', 
+            'FluxoCaixa', 
+            f"Apagou lançamento: {info}"
+        )
         return True
 
     def _serialize(self, t):

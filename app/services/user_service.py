@@ -5,6 +5,9 @@ from flask_jwt_extended import get_jwt
 from werkzeug.security import generate_password_hash
 
 class UserService:
+    def __init__(self):
+      
+        self.audit = AuditService()
     def _get_current_user(self):
         try:
             return get_jwt().get('name', 'Sistema')

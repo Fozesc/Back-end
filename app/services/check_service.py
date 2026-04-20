@@ -357,11 +357,25 @@ class CheckService:
             return False, str(e)
 
     def delete(self, id):
-        check = Check.query.get(id)
-        if not check: return False
-        db.session.delete(check)
+        cheque = Check.query.get(id)
+        if not cheque:
+            return False
+
+        try:
+            info = f"Cheque {cheque.document} - {cheque.issuer_name} (R$ {cheque.amount})"
+        except AttributeError:
+            
+            info = f"ID: {cheque.id}"
+
+        db.session.delete(cheque)
         db.session.commit()
-        self.audit.log_action(self._get_current_user(), 'DELETE', 'Cheque', f"Excluiu permanentemente: {info}")
+
+        self.audit.log_action(
+            self._get_current_user(), 
+            'DELETE', 
+            'Cheque', 
+            f"Excluiu permanentemente: {info}"
+        )
         return True
 
     def _serialize_check(self, c):
