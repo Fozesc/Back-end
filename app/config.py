@@ -1,18 +1,21 @@
 import os
-from dotenv import load_dotenv
 from datetime import timedelta
-load_dotenv() 
 
 class Config:
 
-    user = os.getenv('POSTGRES_USER', 'admin')
-    pw   = os.getenv('POSTGRES_PASSWORD', 'admin')
-    host = os.getenv('POSTGRES_HOST', 'localhost')
-    port = os.getenv('POSTGRES_PORT', '5432')
-    db   = os.getenv('POSTGRES_DB', 'fozesc_db')
+    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL')
     
-    SQLALCHEMY_DATABASE_URI = f"postgresql://{user}:{pw}@{host}:{port}/{db}"
+   
+    if not SQLALCHEMY_DATABASE_URI:
+        raise ValueError("DATABASE_URL não definida no ambiente. ")
+
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
-    SECRET_KEY = os.getenv('SECRET_KEY', 'chave_padrao_dev')
+
+    SECRET_KEY = os.getenv('JWT_SECRET_KEY')
+    
+  
+    if not SECRET_KEY:
+        raise ValueError("JWT_SECRET_KEY não definida.")
+
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
