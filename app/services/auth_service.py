@@ -12,6 +12,7 @@ class AuthService:
  
         if not user or not check_password_hash(user.password_hash, password):
             return None
-            
-        self.audit.log_action(user.name, 'LOGIN', 'Sistema', f"Usuário {email} realizou login.")
+
+        # O log de LOGIN é registrado no auth_controller (após gerar o token).
+        # Foi REMOVIDO daqui porque estava gravando a auditoria de login EM DOBRO.
         return user

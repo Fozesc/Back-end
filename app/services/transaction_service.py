@@ -2,10 +2,8 @@ from app.models.domain import Transaction, CompanySettings
 from app import db
 from app.services.audit_service import AuditService
 from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
-from sqlalchemy import func, or_
 from sqlalchemy import func, case, or_
-import datetime 
-from datetime import datetime, date 
+from datetime import datetime, date
 
 class TransactionService:
     def __init__(self):
@@ -100,7 +98,7 @@ class TransactionService:
         cheques_na_rua = db.session.query(
             Check.bank, 
             func.sum(Check.amount)
-        ).filter(Check.status.in_(['Aguardando', 'Atrasado'])).group_by(Check.bank).all()
+        ).filter(Check.status.in_(['Aguardando', 'Atrasado', 'Prorrogado'])).group_by(Check.bank).all()
 
         na_rua_map = {'BRASIL': 0.0, 'CAIXA': 0.0, 'DINHEIRO': 0.0}
         for banco, valor in cheques_na_rua:
@@ -119,19 +117,21 @@ class TransactionService:
         }
 
     def get_paginated(self, page, per_page, search=None, date_filter=None, type_filter=None):
-        db.session.query(Transaction).filter(
-            or_(Transaction.amount == None, Transaction.date == None)
-        ).delete(synchronize_session=False)
-        db.session.commit()
-
+        # ATENÇÃO: aqui existia um DELETE que apagava transações com amount/date nulos
+        # TODA vez que a lista era carregada (um DELETE dentro de uma simples leitura).
+        # Isso podia sumir com lançamentos silenciosamente. Uma listagem NÃO deve apagar
+        # dados, então foi removido. Nada legítimo é afetado (lançamentos válidos têm
+        # amount e date preenchidos).
         query = Transaction.query.order_by(Transaction.date.desc(), Transaction.id.desc())
         if search: query = query.filter(Transaction.description.ilike(f"%{search}%"))
         if date_filter: query = query.filter(func.date(Transaction.date) == date_filter)
         if type_filter and type_filter != 'todos': query = query.filter(Transaction.type == type_filter)
 
         pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-        entradas = sum(t.amount for t in pagination.items if t.type == 'entrada')
-        saidas = sum(t.amount for t in pagination.items if t.type != 'entrada')
+        # Usa valor ABSOLUTO por tipo para não misturar sinais: borderô grava saída
+        # negativa e cheque manual grava saída positiva. (Mesma lógica robusta de get_balances.)
+        entradas = sum(abs(t.amount or 0) for t in pagination.items if t.type == 'entrada')
+        saidas = sum(abs(t.amount or 0) for t in pagination.items if t.type != 'entrada')
 
         return {
             'items': [self._serialize(t) for t in pagination.items],

@@ -10,7 +10,12 @@ class DashboardService:
         capital = settings.capital_social if settings else 0.0
 
         lucro = db.session.query(func.sum(Check.interest_amount)).scalar() or 0.0
-        carteira = db.session.query(func.sum(Check.amount)).filter(Check.status == 'Aguardando').scalar() or 0.0
+        # Carteira = títulos ativos "na rua" (a receber). Passa a incluir 'Prorrogado'
+        # (renegociado, o cliente ainda deve) além de 'Aguardando'. Antes o cheque
+        # prorrogado sumia da carteira, subestimando o total a receber.
+        carteira = db.session.query(func.sum(Check.amount)).filter(
+            Check.status.in_(['Aguardando', 'Prorrogado'])
+        ).scalar() or 0.0
         inadimplencia = db.session.query(func.sum(Check.amount)).filter(
             Check.status.in_(['Atrasado', 'Devolvido', 'Juridico'])
         ).scalar() or 0.0
@@ -30,7 +35,7 @@ class DashboardService:
 
       
         upcoming = Check.query.filter(
-            Check.status == 'Aguardando',
+            Check.status.in_(['Aguardando', 'Prorrogado']),
             Check.due_date >= datetime.now().date()
         ).order_by(Check.due_date.asc()).limit(5).all()
 

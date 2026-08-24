@@ -46,6 +46,7 @@ class SettingsService:
             'taxaPadrao': ('Taxa Mensal', 'default_monthly_rate'),
             'diasCompensacaoPadrao': ('Dias Comp.', 'default_compensation_days'),
             'iof_rate': ('IOF', 'iof_rate'),
+            'iof_daily_rate': ('IOF Diário', 'iof_daily_rate'),
             'extension_rate': ('Juros Prorrogação', 'extension_rate'),
             'fine_rate': ('Multa Devolução', 'fine_rate')
         }
@@ -81,6 +82,7 @@ class SettingsService:
             'taxaPadrao': s.default_monthly_rate,
             'diasCompensacaoPadrao': s.default_compensation_days,
             'iof_rate': s.iof_rate,
+            'iof_daily_rate': s.iof_daily_rate,
             'extension_rate': s.extension_rate,
             'fine_rate': s.fine_rate
         }

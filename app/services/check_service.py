@@ -183,8 +183,9 @@ class CheckService:
         }
 
     def get_portfolio_total(self):
+        # Inclui 'Prorrogado' (título renegociado ainda a receber) no total da carteira.
         total = db.session.query(func.sum(Check.amount)).filter(
-            Check.status.in_(['Aguardando', 'Atrasado', 'Juridico'])
+            Check.status.in_(['Aguardando', 'Atrasado', 'Juridico', 'Prorrogado'])
         ).scalar()
         return {'total_portfolio': total or 0.0}
 
@@ -247,7 +248,7 @@ class CheckService:
 
             desc_tx = f"Recebimento Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')}"
             transacao = Transaction(
-                date=datetime.now(),
+                date=datetime.now().date(),
                 description=desc_tx[:200],
                 amount=amount_paid, 
                 type='entrada',
@@ -277,7 +278,7 @@ class CheckService:
 
             desc_tx = f"Multa Devolução Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')} ({taxa_multa}%)"
             transacao = Transaction(
-                date=datetime.now(),
+                date=datetime.now().date(),
                 description=desc_tx[:200],
                 amount=multa_calculada, 
                 type='entrada',
@@ -335,7 +336,7 @@ class CheckService:
             if fee_amount_float > 0:
                 desc_tx = f"Taxa Prorrogação Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')}"
                 transacao = Transaction(
-                    date=datetime.now(),
+                    date=datetime.now().date(),
                     description=desc_tx[:200],
                     amount=fee_amount_float,
                     type='entrada',
@@ -361,10 +362,12 @@ class CheckService:
         if not cheque:
             return False
 
+        # O modelo Check não possui campo `document` (o correto é `number`). O código
+        # antigo referenciava `cheque.document`, sempre estourava AttributeError e o log
+        # caía no fallback "ID: X", perdendo a informação do cheque. Corrigido.
         try:
-            info = f"Cheque {cheque.document} - {cheque.issuer_name} (R$ {cheque.amount})"
-        except AttributeError:
-            
+            info = f"Cheque #{cheque.number or 'S/N'} - {cheque.issuer_name} (R$ {cheque.amount})"
+        except Exception:
             info = f"ID: {cheque.id}"
 
         db.session.delete(cheque)
