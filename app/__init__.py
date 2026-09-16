@@ -60,6 +60,17 @@ def create_app():
  
     with app.app_context():
         db.create_all()
+        # ponytail: este projeto nao usa Alembic (nao existe pasta migrations/) e o
+        # create_all() cria tabela nova mas NUNCA altera tabela que ja existe. Por isso
+        # a coluna nova entra por um ALTER idempotente aqui: roda em todo boot, nao
+        # precisa de passo manual no servidor. Se aparecer uma 3a coluna, vale adotar
+        # o Flask-Migrate (ja esta instalado) em vez de empilhar ALTERs aqui.
+        from sqlalchemy import text
+        db.session.execute(text(
+            'ALTER TABLE checks ADD COLUMN IF NOT EXISTS fora_do_calculo '
+            'BOOLEAN NOT NULL DEFAULT FALSE'
+        ))
+        db.session.commit()
 
 
     return app

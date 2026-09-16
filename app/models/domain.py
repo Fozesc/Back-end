@@ -128,6 +128,13 @@ class Check(db.Model):
  
     payment_date = db.Column(db.Date, nullable=True) 
     payment_method = db.Column(db.String(50)) # Ex: 'DINHEIRO', 'PIX'
+
+    # True = cheque e' so historico: fica guardado e pesquisavel, mas FORA de todo
+    # numero do sistema (lucro, carteira, inadimplencia, pizza, proximos vencimentos,
+    # Historico Mensal e divida do cliente). Nasce True nos cheques JA PAGOS que vieram
+    # da planilha antiga; cheque novo e importado em aberto nascem False (contam normal).
+    fora_do_calculo = db.Column(db.Boolean, nullable=False, default=False,
+                                server_default=db.text('false'))
     paid_amount = db.Column(db.Float, default=0.0) # Quanto pagou de verdade
     fine_amount = db.Column(db.Float, default=0.0) # Multas cobradas (se devolvido)
 

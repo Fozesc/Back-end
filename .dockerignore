@@ -17,3 +17,16 @@ README.md
 *.pyc
 *.pyo
 *.pyd
+# --- IMPORTACAO DA PLANILHA ---
+# Nada da importacao entra na imagem nem no GitHub: nem a planilha, nem o script.
+# Para rodar no servidor, mande o import_planilha.py junto com as planilhas pelo
+# docker cp (o passo esta no COMO_IMPORTAR.md, que tambem fica so na sua maquina).
+import_planilha.py
+COMO_IMPORTAR.md
+test_import_clientes.py
+inport/
+conferido*.xlsx
+*.xlsx
+*.xls
+import_logs/
+relatorio_*.csv

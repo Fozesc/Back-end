@@ -1,10 +1,20 @@
-from app.models.domain import Check, Operation, Client, Transaction, CheckExtension
+from app.models.domain import Check, Operation, Client, Transaction, CheckExtension, User
 from app import db
 from app.services.audit_service import AuditService
+from app.utils.sanitizer import sanitize_input
 from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from sqlalchemy import or_, and_, desc, asc, func
 from datetime import datetime, date
 from flask import request
+from werkzeug.security import check_password_hash
+
+# Marca que o import_planilha.py grava em Operation.notes. E' assim que o sistema
+# sabe que um cheque veio da planilha antiga, sem precisar de coluna nova.
+TAG_IMPORT = 'IMPORT-PLANILHA'
+
+# Campos que a edicao de cheque aceita mexer. Valor bruto, juros e liquido NAO estao
+# aqui de proposito: a regra do projeto e nunca recalcular/reescrever juros.
+CAMPOS_EDITAVEIS = ('emitente', 'vencimento', 'data_pagamento', 'data_operacao')
 
 class CheckService:
     def __init__(self):
@@ -16,6 +26,24 @@ class CheckService:
             return get_jwt_identity() or 'Sistema'
         except:
             return 'Sistema'
+
+    def _usuario_logado(self):
+        """O User de verdade (precisa dele para conferir a senha na edicao)."""
+        ident = self._get_current_user()
+        if str(ident).isdigit():
+            return db.session.get(User, int(ident))
+        return None
+
+    def _data(self, valor, campo):
+        """Le AAAA-MM-DD e recusa ano fora da faixa - foi digito errado de ano
+        (2005 no lugar de 2025, 1902 no lugar de 2022) que sujou a planilha antiga."""
+        try:
+            d = datetime.strptime(str(valor), '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            raise ValueError(f"{campo}: data invalida (use AAAA-MM-DD)")
+        if not (2000 <= d.year <= 2100):
+            raise ValueError(f"{campo}: ano {d.year} fora da faixa permitida (2000-2100)")
+        return d
 
     def create(self, data):
         try:
@@ -78,34 +106,86 @@ class CheckService:
 
 
     def update(self, id, data):
+        """
+        Edicao de cheque com confirmacao por SENHA (o 2o fator): quem edita digita a
+        propria senha de novo, senao nada muda. Serve para corrigir nome do emitente e
+        data digitada errada (o caso dos anos 2005/1902 que vieram da planilha).
+
+        NAO mexe em valor bruto, juros nem liquido - nem por senha. O codigo antigo
+        desta funcao fazia `net_amount = valor`, ou seja: editar o valor apagava o
+        juros do cheque sem avisar. Foi tirado.
+        """
         check = Check.query.get(id)
-        if not check: return False, "Cheque não encontrado"
-        
+        if not check:
+            return False, "Cheque não encontrado"
+
+        usuario = self._usuario_logado()
+        if not usuario or not check_password_hash(usuario.password_hash, str(data.get('senha') or '')):
+            self.audit.log_action(self._get_current_user(), 'NEGADO', 'Cheque',
+                                  f"Senha incorreta ao tentar editar cheque #{check.number or 'S/N'} "
+                                  f"({check.issuer_name})")
+            raise PermissionError("Senha incorreta - o cheque não foi alterado")
+
+        if not any(c in data for c in CAMPOS_EDITAVEIS):
+            return False, "Nada para alterar"
+
         try:
-          
-            if 'valor' in data:
-                check.amount = float(data['valor'])
-                check.net_amount = float(data['valor'])
+            mudancas = []
+
+            if 'emitente' in data:
+                novo = sanitize_input(str(data['emitente'] or '')).strip()[:100]
+                if not novo:
+                    return False, "Emitente não pode ficar vazio"
+                if novo != (check.issuer_name or ''):
+                    mudancas.append(f"emitente '{check.issuer_name}' -> '{novo}'")
+                    check.issuer_name = novo
+
             if 'vencimento' in data:
-                check.due_date = datetime.strptime(data['vencimento'], '%Y-%m-%d').date()
-            if 'banco' in data: check.bank = data['banco']
-            if 'num_doc' in data: check.number = data['num_doc']
-            if 'emitente' in data: check.issuer_name = data['emitente']
-            
-            
-            if 'observacao' in data and check.operation:
-                check.operation.notes = data['observacao']
-            
+                nova = self._data(data['vencimento'], 'Vencimento')
+                if nova != check.due_date:
+                    mudancas.append(f"vencimento {check.due_date} -> {nova}")
+                    check.due_date = nova
+                    # de proposito NAO recalcula juros, liquido nem dias.
+
+            if 'data_pagamento' in data:
+                nova = self._data(data['data_pagamento'], 'Data de pagamento') if data['data_pagamento'] else None
+                if nova != check.payment_date:
+                    mudancas.append(f"data de pagamento {check.payment_date} -> {nova}")
+                    check.payment_date = nova
+
+            if 'data_operacao' in data and check.operation:
+                nova = self._data(data['data_operacao'], 'Data da operação')
+                if nova != check.operation.operation_date:
+                    mudancas.append(f"data da operacao (borderô #{check.operation_id}) "
+                                    f"{check.operation.operation_date} -> {nova}")
+                    check.operation.operation_date = nova
+
+            if not mudancas:
+                return True, self._serialize_check(check)
+
             db.session.commit()
-            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Cheque', f"Editou cheque #{check.number}")
+            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Cheque',
+                                  f"Editou cheque #{check.number or 'S/N'} ({check.issuer_name}): "
+                                  + " | ".join(mudancas) + " [confirmado com senha]")
             return True, self._serialize_check(check)
+        except ValueError as e:
+            db.session.rollback()
+            return False, str(e)
         except Exception as e:
             db.session.rollback()
             print(f"Erro ao atualizar cheque: {e}")
-            return False, str(e)
+            return False, "Erro ao atualizar o cheque"
 
-    def get_paginated(self, page, per_page, search=None, status=None, date_start=None, date_end=None, sort_by='due_date', sort_order='asc'):
+    def _montar_query(self, search=None, status=None, date_start=None, date_end=None, calculo=None):
+        """Filtros da tela de Cheques num lugar so: a lista e a acao em lote usam os
+        MESMOS filtros. Sem isso, 'aplicar aos filtrados' podia pegar cheque que voce
+        nem esta vendo na tela."""
         query = Check.query.join(Operation).join(Client)
+
+        if calculo == 'dentro':
+            query = query.filter(Check.fora_do_calculo.is_(False))
+        elif calculo == 'fora':
+            query = query.filter(Check.fora_do_calculo.is_(True))
 
         if search:
             term = f"%{search}%"
@@ -155,6 +235,12 @@ class CheckService:
         if date_end:
             query = query.filter(Check.due_date <= date_end)
 
+        return query
+
+    def get_paginated(self, page, per_page, search=None, status=None, date_start=None,
+                      date_end=None, sort_by='due_date', sort_order='asc', calculo=None):
+        query = self._montar_query(search, status, date_start, date_end, calculo)
+
         sort_column = Check.due_date 
         if sort_by == 'amount': sort_column = Check.amount
         elif sort_by == 'issuer_name': sort_column = Check.issuer_name
@@ -182,10 +268,52 @@ class CheckService:
             'current_page': page
         }
 
+    def definir_calculo(self, fora, ids=None, filtros=None):
+        """
+        Liga/desliga 'fora do calculo' em LOTE. Dois modos:
+          - ids=[1,2,3]        -> so os cheques marcados na tela
+          - filtros={...}      -> todos os que batem com o filtro atual da tela
+                                  (ex: status=Juridico), sem precisar marcar um por um.
+
+        E' um UPDATE unico no banco (nao carrega 8 mil cheques na memoria) e deixa
+        UMA linha na auditoria com a quantidade, nao uma por cheque.
+        """
+        fora = bool(fora)
+
+        if ids:
+            try:
+                ids = [int(i) for i in ids][:5000]
+            except (TypeError, ValueError):
+                return False, "Lista de cheques inválida"
+            alvo = Check.query.filter(Check.id.in_(ids))
+            descricao = f"{len(ids)} cheque(s) selecionado(s)"
+        elif filtros:
+            sub = self._montar_query(**filtros).with_entities(Check.id).scalar_subquery()
+            alvo = Check.query.filter(Check.id.in_(sub))
+            usados = {k: v for k, v in filtros.items() if v}
+            descricao = f"filtro {usados or 'nenhum (todos)'}"
+        else:
+            return False, "Informe os cheques (selecionados ou por filtro)"
+
+        try:
+            quantos = alvo.update({Check.fora_do_calculo: fora}, synchronize_session=False)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Erro ao mudar fora_do_calculo: {e}")
+            return False, "Erro ao aplicar a alteração"
+
+        acao = 'TIROU DO CALCULO' if fora else 'VOLTOU AO CALCULO'
+        self.audit.log_action(self._get_current_user(), 'UPDATE', 'Cheque',
+                              f"{acao}: {quantos} cheque(s) | {descricao}")
+        return True, {'alterados': quantos, 'fora_do_calculo': fora}
+
     def get_portfolio_total(self):
         # Inclui 'Prorrogado' (título renegociado ainda a receber) no total da carteira.
+        # Cheque marcado como 'fora do calculo' (historico da planilha) nao entra.
         total = db.session.query(func.sum(Check.amount)).filter(
-            Check.status.in_(['Aguardando', 'Atrasado', 'Juridico', 'Prorrogado'])
+            Check.status.in_(['Aguardando', 'Atrasado', 'Juridico', 'Prorrogado']),
+            Check.fora_do_calculo.is_(False)
         ).scalar()
         return {'total_portfolio': total or 0.0}
 
@@ -399,9 +527,15 @@ class CheckService:
                 forma_devolucao = tx_dev.origin
 
 
+        op_notes = (getattr(c.operation, 'notes', '') or '') if getattr(c, 'operation', None) else ''
+
         return {
             'id': c.id,
             'operation_id': c.operation_id,
+            'fora_do_calculo': bool(getattr(c, 'fora_do_calculo', False)),
+            'importado': TAG_IMPORT in op_notes,
+            'data_operacao': (c.operation.operation_date.strftime('%Y-%m-%d')
+                              if getattr(c, 'operation', None) and c.operation.operation_date else None),
             'numero': getattr(c, 'number', ''),
             'banco': getattr(c, 'bank', ''),
             'num_doc': getattr(c, 'number', ''),

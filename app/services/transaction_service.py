@@ -1,7 +1,6 @@
 from app.models.domain import Transaction, CompanySettings
 from app import db
 from app.services.audit_service import AuditService
-from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from sqlalchemy import func, case, or_
 from datetime import datetime, date
 
@@ -98,7 +97,10 @@ class TransactionService:
         cheques_na_rua = db.session.query(
             Check.bank, 
             func.sum(Check.amount)
-        ).filter(Check.status.in_(['Aguardando', 'Atrasado', 'Prorrogado'])).group_by(Check.bank).all()
+        ).filter(
+            Check.status.in_(['Aguardando', 'Atrasado', 'Prorrogado']),
+            Check.fora_do_calculo.is_(False)   # historico da planilha nao esta "na rua"
+        ).group_by(Check.bank).all()
 
         na_rua_map = {'BRASIL': 0.0, 'CAIXA': 0.0, 'DINHEIRO': 0.0}
         for banco, valor in cheques_na_rua:

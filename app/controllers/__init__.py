@@ -1,5 +1,3 @@
-from flask import Blueprint
-
 def register_blueprints(app):
     # Importações
     from .client_controller import bp as client_bp

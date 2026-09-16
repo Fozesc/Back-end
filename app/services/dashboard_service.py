@@ -1,6 +1,6 @@
 from app import db
 from app.models.domain import Check, Transaction, CompanySettings, Operation
-from sqlalchemy import func, case, text
+from sqlalchemy import func, case
 from datetime import datetime, timedelta
 
 class DashboardService:
@@ -9,20 +9,34 @@ class DashboardService:
         settings = CompanySettings.query.first()
         capital = settings.capital_social if settings else 0.0
 
-        lucro = db.session.query(func.sum(Check.interest_amount)).scalar() or 0.0
+        # FORA_DO_CALCULO: cheque marcado como historico (os pagos que vieram da
+        # planilha antiga) nao entra em nenhum numero daqui. E' o que faz o lucro
+        # acumulado "comecar de agora" sem apagar nada do historico.
+        #
+        # LUCRO = juros de cheque PAGO (juros que entrou de verdade). Antes somava o
+        # juros de TODO cheque, pago ou nao: com a planilha importada isso mostrava
+        # R$ 215 mil de juros de cheque antigo ainda em aberto como se fosse lucro.
+        # Decisao do Lucas (15/09/2026). Os cheques em aberto continuam aparecendo
+        # em Carteira e Inadimplencia - so nao contam como lucro antes de receber.
+        lucro = db.session.query(func.sum(Check.interest_amount)).filter(
+            Check.fora_do_calculo.is_(False),
+            Check.status == 'Pago'
+        ).scalar() or 0.0
         # Carteira = títulos ativos "na rua" (a receber). Passa a incluir 'Prorrogado'
         # (renegociado, o cliente ainda deve) além de 'Aguardando'. Antes o cheque
         # prorrogado sumia da carteira, subestimando o total a receber.
         carteira = db.session.query(func.sum(Check.amount)).filter(
-            Check.status.in_(['Aguardando', 'Prorrogado'])
+            Check.status.in_(['Aguardando', 'Prorrogado']),
+            Check.fora_do_calculo.is_(False)
         ).scalar() or 0.0
         inadimplencia = db.session.query(func.sum(Check.amount)).filter(
-            Check.status.in_(['Atrasado', 'Devolvido', 'Juridico'])
+            Check.status.in_(['Atrasado', 'Devolvido', 'Juridico']),
+            Check.fora_do_calculo.is_(False)
         ).scalar() or 0.0
 
         status_sums = db.session.query(
             Check.status, func.sum(Check.amount)
-        ).group_by(Check.status).all()
+        ).filter(Check.fora_do_calculo.is_(False)).group_by(Check.status).all()
         
         status_map = {s: float(v or 0) for s, v in status_sums}
         pie_data = [
@@ -36,7 +50,8 @@ class DashboardService:
       
         upcoming = Check.query.filter(
             Check.status.in_(['Aguardando', 'Prorrogado']),
-            Check.due_date >= datetime.now().date()
+            Check.due_date >= datetime.now().date(),
+            Check.fora_do_calculo.is_(False)
         ).order_by(Check.due_date.asc()).limit(5).all()
 
         upcoming_data = [{
@@ -81,10 +96,16 @@ class DashboardService:
             trunc_type = 'month'
 
       
+        # Soma o juros CHEQUE POR CHEQUE (antes somava Operation.total_interest) para
+        # poder tirar do grafico so os cheques marcados como historico. Conferido no
+        # banco: sum(Check.interest_amount) == Operation.total_interest, diferenca 0,00
+        # em todos os 4.119 borderos - o numero de quem conta nao muda.
         profit_query = db.session.query(
             func.to_char(Operation.operation_date, 'YYYY-MM-DD'),
-            func.sum(Operation.total_interest)
-        ).filter(Operation.operation_date >= start_date)\
+            func.sum(Check.interest_amount)
+        ).join(Check, Check.operation_id == Operation.id)\
+         .filter(Operation.operation_date >= start_date,
+                 Check.fora_do_calculo.is_(False))\
          .group_by(func.to_char(Operation.operation_date, 'YYYY-MM-DD'))\
          .all()
 

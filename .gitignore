@@ -11,3 +11,44 @@ backups/
 cheques.xlsx    
 Borderô Fozesc.xlsx  
 create_admin.py
+#
+inport/
+*.xlsx
+*.xls
+conferido*.xlsx
+clientes_*aprovado*.xlsx
+mapa_revisao*.xlsx
+
+# backups e dumps do banco
+*.sql
+*.sql.gz
+*.dump
+antes do inport*
+backup_*
+
+# logs e relatórios gerados pela importação
+import_logs/
+import_logs*/
+teste_prod/
+teste_final/
+relatorio_*.csv
+
+# --- IMPORTACAO DA PLANILHA: nada disso vai para o GitHub ---
+# Os scripts de importacao ficam SO na maquina do Lucas. Para rodar no servidor,
+# mande o script junto com as planilhas pelo docker cp (ver COMO_IMPORTAR.md).
+import_planilha.py
+import_clients.py
+import_history.py
+import_history*.py
+import_*.py
+COMO_IMPORTAR.md
+test_import_clientes.py
+import/
+/import
+inport*/
+*.xlsm
+*.ods
+planilha*
+Planilha*
+conferido*
+clientes_a_conferir*

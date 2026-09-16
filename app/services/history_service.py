@@ -1,7 +1,7 @@
 import calendar
 from datetime import date
 from app import db
-from app.models.domain import Transaction, Operation
+from app.models.domain import Transaction, Operation, Check
 from sqlalchemy import func, case, extract
 
 MESES_PT = [
@@ -60,19 +60,27 @@ class HistoryService:
             ), 0.0)
         ).filter(Transaction.date <= end).scalar() or 0.0
 
+        # Lucro/total operado saem da soma dos CHEQUES que contam (fora_do_calculo=False),
+        # nao mais dos totais gravados no bordero. Motivo: o historico da planilha antiga
+        # (cheques ja pagos de 2021-2026) precisa ficar fora do Historico Mensal.
+        # Conferido no banco: a soma por cheque bate exatamente com o total do bordero.
         lucro = db.session.query(
-            func.coalesce(func.sum(Operation.total_interest), 0.0)
-        ).filter(Operation.operation_date >= start,
-                 Operation.operation_date <= end).scalar() or 0.0
+            func.coalesce(func.sum(Check.interest_amount), 0.0)
+        ).join(Operation, Check.operation_id == Operation.id)\
+         .filter(Operation.operation_date >= start, Operation.operation_date <= end,
+                 Check.fora_do_calculo.is_(False)).scalar() or 0.0
 
         total_operado = db.session.query(
-            func.coalesce(func.sum(Operation.total_face_value), 0.0)
-        ).filter(Operation.operation_date >= start,
-                 Operation.operation_date <= end).scalar() or 0.0
+            func.coalesce(func.sum(Check.amount), 0.0)
+        ).join(Operation, Check.operation_id == Operation.id)\
+         .filter(Operation.operation_date >= start, Operation.operation_date <= end,
+                 Check.fora_do_calculo.is_(False)).scalar() or 0.0
 
-        qtd_operacoes = db.session.query(func.count(Operation.id)).filter(
-            Operation.operation_date >= start, Operation.operation_date <= end
-        ).scalar() or 0
+        qtd_operacoes = db.session.query(
+            func.count(func.distinct(Operation.id))
+        ).join(Check, Check.operation_id == Operation.id)\
+         .filter(Operation.operation_date >= start, Operation.operation_date <= end,
+                 Check.fora_do_calculo.is_(False)).scalar() or 0
 
         entradas = round(float(entradas), 2)
         saidas = round(float(saidas), 2)
@@ -171,9 +179,14 @@ class HistoryService:
         q_tx = db.session.query(
             extract('year', Transaction.date), extract('month', Transaction.date)
         ).filter(Transaction.date.isnot(None)).distinct().all()
+        # So meses com bordero que tem cheque contando. Sem isto, os 4.113 borderos
+        # importados abririam ~60 meses de historico vazio no seletor (inclusive o
+        # "Setembro/1902" de uma data digitada errada na planilha).
         q_op = db.session.query(
             extract('year', Operation.operation_date), extract('month', Operation.operation_date)
-        ).filter(Operation.operation_date.isnot(None)).distinct().all()
+        ).join(Check, Check.operation_id == Operation.id)\
+         .filter(Operation.operation_date.isnot(None),
+                 Check.fora_do_calculo.is_(False)).distinct().all()
 
         for y, m in list(q_tx) + list(q_op):
             if y and m:

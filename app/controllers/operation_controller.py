@@ -23,8 +23,17 @@ def store():
 @bp.route('', methods=['GET'])
 @jwt_required()
 def index():
-    operations = service.get_all()
-    return jsonify(operations_schema.dump(operations))
+    # Paginado: com o histórico da planilha importado são 4 mil borderôs, e mandar
+    # todos de uma vez travava a tela. O formato ({items, total, pages}) é o mesmo
+    # que a tela de Borderô já esperava receber.
+    resultado = service.get_paginated(
+        page=request.args.get('page', 1, type=int),
+        per_page=request.args.get('per_page', 20, type=int),
+        sort_by=request.args.get('sort_by', 'id'),
+        sort_order=request.args.get('sort_order', 'desc'),
+    )
+    resultado['items'] = operations_schema.dump(resultado['items'])
+    return jsonify(resultado)
 
 
 @bp.route('/client/<int:client_id>', methods=['GET'])

@@ -4,7 +4,7 @@ from app import db
 from app.models.domain import Operation, Check, Transaction, Client
 from flask_jwt_extended import get_jwt
 from app.services.audit_service import AuditService
-from sqlalchemy import desc
+from sqlalchemy import asc, desc
 from sqlalchemy.orm import joinedload
 
 class OperationService:
@@ -173,6 +173,37 @@ class OperationService:
             
     def get_all(self):
         return Operation.query.all()
+
+    def get_paginated(self, page=1, per_page=20, sort_by='id', sort_order='desc'):
+        """
+        Lista de borderôs paginada.
+
+        Antes existia só o get_all(), que devolvia TODOS os borderôs com TODOS os
+        cheques de uma vez. Com os 6 borderôs de teste isso era instantâneo; depois
+        de importar a planilha (4.113 borderôs / 8.665 cheques) virou uma resposta
+        de ~7 MB e ~7 s a cada abertura da tela de Borderô.
+        A tela (BorderoView.fetchNextId) já lia 'items' e 'total' — só que ninguém
+        os enviava. Agora envia. O get_all() acima continua existindo intacto.
+        """
+        colunas = {
+            'id': Operation.id,
+            'operation_date': Operation.operation_date,
+            'total_face_value': Operation.total_face_value,
+        }
+        coluna = colunas.get(sort_by, Operation.id)
+        ordem = desc(coluna) if str(sort_order).lower() == 'desc' else asc(coluna)
+
+        paginacao = Operation.query\
+            .options(joinedload(Operation.checks))\
+            .order_by(ordem)\
+            .paginate(page=page, per_page=per_page, error_out=False)
+
+        return {
+            'items': paginacao.items,
+            'total': paginacao.total,
+            'pages': paginacao.pages,
+            'current_page': page,
+        }
 
     def get_by_client(self, client_id):
     

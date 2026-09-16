@@ -18,8 +18,33 @@ def index():
     date_end = request.args.get('date_end')
     sort_by = request.args.get('sort_by', 'due_date')
     sort_order = request.args.get('sort_order', 'asc')
-    
-    return jsonify(service.get_paginated(page, per_page, search, status, date_start, date_end, sort_by, sort_order))
+    calculo = request.args.get('calculo')  # 'dentro' | 'fora' | vazio (todos)
+
+    return jsonify(service.get_paginated(page, per_page, search, status, date_start,
+                                         date_end, sort_by, sort_order, calculo))
+
+
+# Filtros que a acao em lote aceita - os MESMOS da listagem. Whitelist de proposito:
+# sem ela, um campo qualquer no JSON entraria direto como parametro da query.
+FILTROS_LOTE = ('search', 'status', 'date_start', 'date_end', 'calculo')
+
+
+@bp.route('/calculo', methods=['PATCH'])
+@jwt_required()
+def definir_calculo():
+    """Tira/devolve cheques do calculo em lote (selecionados ou pelo filtro da tela)."""
+    data = request.get_json(silent=True) or {}
+
+    if 'fora' not in data:
+        return jsonify({'error': "Informe 'fora': true (tirar do cálculo) ou false (voltar)"}), 400
+
+    ids = data.get('ids')
+    filtros = {k: v for k, v in (data.get('filtros') or {}).items() if k in FILTROS_LOTE}
+
+    success, result = service.definir_calculo(data.get('fora'), ids=ids, filtros=filtros)
+    if success:
+        return jsonify(result), 200
+    return jsonify({'error': result}), 400
 
 @bp.route('/portfolio-total', methods=['GET'])
 @jwt_required()
@@ -88,8 +113,12 @@ def create_check():
 @bp.route('/<int:id>', methods=['PUT'], strict_slashes=False)
 @jwt_required()
 def update_check(id):
-    data = request.get_json()
-    success, result = service.update(id, data)
+    """Edita nome/datas do cheque. Exige a senha de quem esta logado no corpo do PUT."""
+    data = request.get_json(silent=True) or {}
+    try:
+        success, result = service.update(id, data)
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
     if success:
         return jsonify(result), 200
     return jsonify({'error': result}), 400

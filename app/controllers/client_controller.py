@@ -38,3 +38,23 @@ def update(id):
     client = service.update(id, request.json)
     if client: return jsonify({'message': 'Atualizado'})
     return jsonify({'error': 'Erro ao atualizar'}), 400
+
+@bp.route('/merge', methods=['POST'])
+@jwt_required()
+def merge():
+    """Junta dois cadastros do mesmo cliente. Exige a senha de quem esta logado."""
+    data = request.json or {}
+    try:
+        origem = int(data.get('origem_id'))
+        destino = int(data.get('destino_id'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Informe os dois clientes'}), 400
+
+    try:
+        return jsonify(service.merge(origem, destino, data.get('senha')))
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception:
+        return jsonify({'error': 'Não foi possível juntar os cadastros'}), 500
