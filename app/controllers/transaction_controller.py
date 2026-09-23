@@ -50,6 +50,12 @@ def update_initial_balances():
 @bp.route('/<int:id>', methods=['DELETE'])
 @jwt_required()
 def delete(id):
-    if service.delete(id):
+    """Apaga lancamento do caixa. Exige a senha de quem esta logado no corpo."""
+    data = request.get_json(silent=True) or {}
+    try:
+        ok, erro = service.delete(id, data.get('senha'))
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    if ok:
         return jsonify({'message': 'Deletado com sucesso'})
-    return jsonify({'error': 'Erro ao deletar'}), 400
+    return jsonify({'error': erro or 'Erro ao deletar'}), 404

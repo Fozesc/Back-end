@@ -16,6 +16,19 @@ TAG_IMPORT = 'IMPORT-PLANILHA'
 # aqui de proposito: a regra do projeto e nunca recalcular/reescrever juros.
 CAMPOS_EDITAVEIS = ('emitente', 'vencimento', 'data_pagamento', 'data_operacao')
 
+# Contas que existem no caixa. A origem da transacao TEM que ser uma destas: e' esse
+# texto que o get_balances usa para decidir em qual saldo o dinheiro entrou
+# (BB -> Banco do Brasil, Caixa -> Caixa Economica, resto -> Dinheiro). Aceitar texto
+# livre aqui faria o dinheiro cair no saldo errado, por isso e' whitelist.
+CONTAS_CAIXA = ('Dinheiro', 'BB', 'Caixa')
+
+# Como o cliente pagou. E' so um rotulo que vai na descricao do lancamento - quem
+# manda no saldo e a conta, nao a forma (um PIX cai no banco, nao no cofre).
+FORMAS_PAGAMENTO = ('Dinheiro', 'PIX', 'TED/DOC', 'Depósito', 'Cheque', 'Outro')
+
+# Teto de partes num recebimento dividido (evita payload absurdo virar 500 linhas no caixa)
+MAX_PARTES = 10
+
 class CheckService:
     def __init__(self):
         self.audit = AuditService()
@@ -80,6 +93,7 @@ class CheckService:
                 status='Aguardando'
             )
             db.session.add(novo_cheque)
+            db.session.flush()   # precisa do id para vincular o lancamento ao cheque
             
            
             if conta_saida and amount > 0:
@@ -91,7 +105,8 @@ class CheckService:
                     type='saida',
                     origin=conta_saida, 
                     category='Empréstimo Manual',
-                    operation_id=nova_operacao.id
+                    operation_id=nova_operacao.id,
+                    check_id=novo_cheque.id
                 )
                 db.session.add(transacao)
 
@@ -308,6 +323,27 @@ class CheckService:
                               f"{acao}: {quantos} cheque(s) | {descricao}")
         return True, {'alterados': quantos, 'fora_do_calculo': fora}
 
+    def listar_emitentes(self, termo=None, limite=10):
+        """Nomes de emitente ja usados, do mais frequente para o menos.
+
+        Serve para o campo do borderô sugerir o nome que ja esta no banco em vez de
+        cada um digitar de um jeito - foi esse tipo de divergencia (um nome curto
+        que tambem existe numa versao longa) que deu trabalho na importacao da planilha.
+        Cheque marcado como historico (fora_do_calculo) ENTRA aqui de proposito: os
+        8.254 cheques pagos da planilha sao onde estao quase todos os nomes reais de
+        emitente. Agregado no banco e com limite: nunca traz os 653 nomes de uma vez.
+        """
+        limite = max(1, min(int(limite or 10), 20))
+        q = db.session.query(Check.issuer_name).filter(
+            Check.issuer_name.isnot(None), Check.issuer_name != '')
+        termo = (termo or '').strip()
+        if termo:
+            q = q.filter(Check.issuer_name.ilike(f'%{termo}%'))
+        linhas = q.group_by(Check.issuer_name)\
+                  .order_by(func.count(Check.id).desc(), Check.issuer_name.asc())\
+                  .limit(limite).all()
+        return [nome for (nome,) in linhas]
+
     def get_portfolio_total(self):
         # Inclui 'Prorrogado' (título renegociado ainda a receber) no total da carteira.
         # Cheque marcado como 'fora do calculo' (historico da planilha) nao entra.
@@ -317,115 +353,190 @@ class CheckService:
         ).scalar()
         return {'total_portfolio': total or 0.0}
 
+    def _validar_partes(self, partes, total):
+        """Recebimento dividido (parte no dinheiro, parte no banco...).
+
+        Valida tudo ANTES de encostar no caixa e devolve [(conta, forma, valor)].
+        A soma das partes tem que fechar com o valor do titulo: se fechasse por menos,
+        o cheque ficava Pago com dinheiro que nunca entrou.
+        """
+        if not isinstance(partes, list) or not partes:
+            raise ValueError("Informe as partes do recebimento")
+        if len(partes) > MAX_PARTES:
+            raise ValueError(f"Máximo de {MAX_PARTES} partes por recebimento")
+
+        limpas = []
+        for i, p in enumerate(partes, 1):
+            if not isinstance(p, dict):
+                raise ValueError(f"Parte {i}: formato inválido")
+
+            conta = str(p.get('conta') or p.get('method') or '').strip()
+            if conta not in CONTAS_CAIXA:
+                raise ValueError(f"Parte {i}: conta inválida (use {', '.join(CONTAS_CAIXA)})")
+
+            forma = str(p.get('forma') or '').strip()
+            if forma and forma not in FORMAS_PAGAMENTO:
+                raise ValueError(f"Parte {i}: forma de pagamento inválida")
+
+            try:
+                valor = round(float(p.get('valor', p.get('amount', 0))), 2)
+            except (TypeError, ValueError):
+                raise ValueError(f"Parte {i}: valor inválido")
+            if valor <= 0:
+                raise ValueError(f"Parte {i}: o valor tem que ser maior que zero")
+
+            limpas.append((conta, forma, valor))
+
+        soma = round(sum(v for _, _, v in limpas), 2)
+        total = round(float(total or 0), 2)
+        if abs(soma - total) > 0.01:
+            raise ValueError(f"A soma das partes (R$ {soma:.2f}) tem que fechar com o "
+                             f"valor do título (R$ {total:.2f})")
+        return limpas
+
+    def _apagar_lancamentos(self, check, categoria, prefixo):
+        """Desfaz no caixa o que a baixa/devolucao criou.
+
+        Um recebimento dividido gera VARIAS linhas, entao apaga todas as que estao
+        vinculadas ao cheque (check_id). O `prefixo` desempata dentro da mesma
+        categoria - multa de devolucao e taxa de prorrogacao dividem 'Multas e Juros'.
+        Lancamento antigo (gravado antes do check_id existir) ainda e' achado pelo
+        texto, como era antes: um so, o mais recente que casa.
+        """
+        base = Transaction.query.filter(Transaction.category == categoria,
+                                        Transaction.description.like(f"{prefixo}%"))
+        lancamentos = base.filter(Transaction.check_id == check.id).all()
+
+        if not lancamentos:
+            legado = base.filter(
+                Transaction.check_id.is_(None),
+                Transaction.operation_id == check.operation_id,
+                Transaction.description.like(
+                    f"{prefixo} #{check.number or 'S/N'} - {check.issuer_name or ''}%")
+            ).first()
+            lancamentos = [legado] if legado else []
+
+        for t in lancamentos:
+            db.session.delete(t)
+        return len(lancamentos)
+
     def update_status(self, id, new_status, payment_data=None):
         check = Check.query.get(id)
         if not check: return False
-        
+
+        dados = payment_data if isinstance(payment_data, dict) else {}
         old_status = check.status
+
+        # Valida ANTES de mexer no cheque: pedido invalido nao chega a alterar nada.
+        partes = None
+        if new_status == 'Pago' and old_status != 'Pago':
+            if dados.get('partes'):
+                partes = self._validar_partes(dados['partes'], check.amount)
+            else:
+                if (dados.get('method') or 'Dinheiro') not in CONTAS_CAIXA:
+                    raise ValueError(f"Conta inválida (use {', '.join(CONTAS_CAIXA)})")
+                forma_unica = str(dados.get('forma') or '').strip()
+                if forma_unica and forma_unica not in FORMAS_PAGAMENTO:
+                    raise ValueError("Forma de pagamento inválida")
+        if new_status == 'Devolvido' and old_status != 'Devolvido':
+            if (dados.get('method') or 'Dinheiro') not in CONTAS_CAIXA:
+                raise ValueError(f"Conta inválida (use {', '.join(CONTAS_CAIXA)})")
+
         check.status = new_status
-        
-        
+        detalhe_partes = ''
+
         if old_status == 'Pago' and new_status != 'Pago':
-            if hasattr(check, 'payment_date'): check.payment_date = None
-            if hasattr(check, 'paid_amount'): check.paid_amount = 0.0
-            
-            
-            prefixo_pgto = f"Recebimento Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')}"
-            transacao_pgto = Transaction.query.filter(
-                Transaction.operation_id == check.operation_id,
-                Transaction.category == 'Recebimento de Cheque',
-                Transaction.description.like(f"{prefixo_pgto}%")
-            ).first()
-            
-            if transacao_pgto:
-                db.session.delete(transacao_pgto)
+            check.payment_date = None
+            check.paid_amount = 0.0
+            check.payment_method = None
+            self._apagar_lancamentos(check, 'Recebimento de Cheque', 'Recebimento Cheque')
 
         if old_status == 'Devolvido' and new_status != 'Devolvido':
-            if hasattr(check, 'fine_amount'): check.fine_amount = 0.0
-            
-    
-            prefixo_multa = f"Multa Devolução Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')}"
-            transacao_multa = Transaction.query.filter(
-                Transaction.operation_id == check.operation_id,
-                Transaction.category == 'Multas e Juros',
-                Transaction.description.like(f"{prefixo_multa}%")
-            ).first()
-            
-            if transacao_multa:
-                db.session.delete(transacao_multa)
+            check.fine_amount = 0.0
+            self._apagar_lancamentos(check, 'Multas e Juros', 'Multa Devolução Cheque')
 
         # --- LÓGICA DE NOVO PAGAMENTO ---
         if new_status == 'Pago' and old_status != 'Pago':
-        
-            method = 'Dinheiro'
-            amount_paid = float(check.amount) if hasattr(check, 'amount') else 0.0
-            
-            try:
-                req_data = request.get_json(silent=True)
-                if req_data and 'payment_data' in req_data:
-                    if 'method' in req_data['payment_data']:
-                        method = req_data['payment_data']['method']
-                    if 'amount' in req_data['payment_data']:
-                        amount_paid = float(req_data['payment_data']['amount'])
-            except Exception as e:
-                print(f"Erro ao ler método de pagamento: {e}")
-                
-            if hasattr(check, 'payment_date'): check.payment_date = datetime.now().date()
-            if hasattr(check, 'paid_amount'): check.paid_amount = amount_paid
-            if hasattr(check, 'payment_method'): check.payment_method = method 
+            hoje = datetime.now().date()
+            desc_base = f"Recebimento Cheque #{check.number or 'S/N'} - {check.issuer_name or ''}"
 
-            desc_tx = f"Recebimento Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')}"
-            transacao = Transaction(
-                date=datetime.now().date(),
-                description=desc_tx[:200],
-                amount=amount_paid, 
-                type='entrada',
-                origin=method, 
-                category='Recebimento de Cheque',
-                operation_id=check.operation_id
-            )
-            db.session.add(transacao)
-        
+            if partes:
+                total_pago = round(sum(v for _, _, v in partes), 2)
+                qtd = len(partes)
+                for i, (conta, forma, valor) in enumerate(partes, 1):
+                    # "Dinheiro · Dinheiro" e' redundante: forma so aparece se somar info
+                    rotulo = f" (Parte {i}/{qtd}" + (f" · {forma}" if forma and forma != conta else "") + ")"
+                    db.session.add(Transaction(
+                        date=hoje,
+                        description=(desc_base + rotulo)[:200],
+                        amount=valor,
+                        type='entrada',
+                        origin=conta,
+                        category='Recebimento de Cheque',
+                        operation_id=check.operation_id,
+                        check_id=check.id
+                    ))
+                contas = list(dict.fromkeys(c for c, _, _ in partes))
+                check.payment_method = f"Múltiplo ({' + '.join(contas)})"[:50]
+                detalhe_partes = ' | Partes: ' + ' + '.join(
+                    f"{c} R$ {v:.2f}" + (f" ({f})" if f else "") for c, f, v in partes)
+            else:
+                method = dados.get('method') or 'Dinheiro'
+                forma = str(dados.get('forma') or '').strip()
+                try:
+                    total_pago = round(float(dados.get('amount') or check.amount or 0), 2)
+                except (TypeError, ValueError):
+                    raise ValueError("Valor recebido inválido")
+                # a forma e' so rotulo ("recebi via PIX"): quem manda no saldo e a conta
+                rotulo = f" · {forma}" if forma and forma != method else ""
+                check.payment_method = f"{method}{rotulo}"[:50]
+                db.session.add(Transaction(
+                    date=hoje,
+                    description=(desc_base + rotulo)[:200],
+                    amount=total_pago,
+                    type='entrada',
+                    origin=method,
+                    category='Recebimento de Cheque',
+                    operation_id=check.operation_id,
+                    check_id=check.id
+                ))
+
+            check.payment_date = hoje
+            check.paid_amount = total_pago
+
         # --- LÓGICA DE NOVO CHEQUE DEVOLVIDO ---
         elif new_status == 'Devolvido' and old_status != 'Devolvido':
-            taxa_multa = 2.0
-            method = 'Dinheiro' 
-            
             try:
-                req_data = request.get_json(silent=True)
-                if req_data and 'payment_data' in req_data:
-                    if 'taxa_multa' in req_data['payment_data']:
-                        taxa_multa = float(req_data['payment_data']['taxa_multa'])
-                    if 'method' in req_data['payment_data']:
-                        method = req_data['payment_data']['method'] 
-            except Exception as e:
-                print(f"Erro ao ler taxa/método: {e}")
+                taxa_multa = float(dados.get('taxa_multa', 2.0) or 0.0)
+            except (TypeError, ValueError):
+                raise ValueError("Taxa de multa inválida")
+            method = dados.get('method') or 'Dinheiro'
 
-            multa_calculada = float(getattr(check, 'amount', 0.0)) * (taxa_multa / 100.0)
-            if hasattr(check, 'fine_amount'): check.fine_amount = multa_calculada
+            multa_calculada = round(float(check.amount or 0.0) * (taxa_multa / 100.0), 2)
+            check.fine_amount = multa_calculada
 
-            desc_tx = f"Multa Devolução Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')} ({taxa_multa}%)"
-            transacao = Transaction(
+            desc_tx = (f"Multa Devolução Cheque #{check.number or 'S/N'} - "
+                       f"{check.issuer_name or ''} ({taxa_multa}%)")
+            db.session.add(Transaction(
                 date=datetime.now().date(),
                 description=desc_tx[:200],
-                amount=multa_calculada, 
+                amount=multa_calculada,
                 type='entrada',
-                origin=method, 
+                origin=method,
                 category='Multas e Juros',
-                operation_id=check.operation_id
-            )
-            db.session.add(transacao)
+                operation_id=check.operation_id,
+                check_id=check.id
+            ))
 
         db.session.commit()
 
         acao = 'BAIXA' if new_status == 'Pago' else 'UPDATE'
         detalhes = f"Cheque #{check.number} ({check.issuer_name}): {old_status} -> {new_status}"
-        if new_status == 'Pago': detalhes += f" | Recebido: R$ {check.paid_amount}"
+        if new_status == 'Pago': detalhes += f" | Recebido: R$ {check.paid_amount}{detalhe_partes}"
         if new_status == 'Devolvido': detalhes += f" | Multa: R$ {check.fine_amount}"
-        
+
         self.audit.log_action(self._get_current_user(), acao, 'Cheque', detalhes)
 
-        
         return check
 
     def prorrogate_check(self, check_id, new_date_str, fee_amount, notes):
@@ -470,7 +581,8 @@ class CheckService:
                     type='entrada',
                     origin=method,
                     category='Multas e Juros',
-                    operation_id=check.operation_id
+                    operation_id=check.operation_id,
+                    check_id=check.id
                 )
                 db.session.add(transacao)
 
@@ -529,6 +641,24 @@ class CheckService:
 
         op_notes = (getattr(c.operation, 'notes', '') or '') if getattr(c, 'operation', None) else ''
 
+        # Quebra do recebimento dividido. So consulta quando o cheque foi recebido em
+        # partes (o payment_method marca isso) - assim a listagem de cheques normal
+        # continua sem consulta extra por linha.
+        partes_pagamento = []
+        if (getattr(c, 'payment_method', '') or '').startswith('Múltiplo'):
+            for t in Transaction.query.filter(
+                    Transaction.check_id == c.id,
+                    Transaction.category == 'Recebimento de Cheque'
+                    ).order_by(Transaction.id).all():
+                desc = t.description or ''
+                # a forma ("PIX", "Dinheiro"...) fica no rotulo "(Parte 1/2 · PIX)"
+                forma = desc.rsplit('·', 1)[-1].rstrip(')').strip() if '·' in desc else ''
+                partes_pagamento.append({
+                    'conta': t.origin,
+                    'forma': forma,
+                    'valor': float(t.amount or 0.0)
+                })
+
         return {
             'id': c.id,
             'operation_id': c.operation_id,
@@ -551,6 +681,7 @@ class CheckService:
             'data_pagamento': c.payment_date.strftime('%Y-%m-%d') if getattr(c, 'payment_date', None) else None,
             'valor_pago': float(getattr(c, 'paid_amount', 0.0)),
             'forma_pagamento': getattr(c, 'payment_method', None),
+            'partes_pagamento': partes_pagamento,
             'forma_devolucao': forma_devolucao,
             'cliente': c.operation.client.name if c.operation and c.operation.client else 'Sem Cliente',
             'emitente': getattr(c, 'issuer_name', ''),

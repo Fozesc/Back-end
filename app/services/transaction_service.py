@@ -1,8 +1,10 @@
-from app.models.domain import Transaction, CompanySettings
+from app.models.domain import Transaction, CompanySettings, User, Check, Operation
 from app import db
 from app.services.audit_service import AuditService
 from sqlalchemy import func, case, or_
 from datetime import datetime, date
+from werkzeug.security import check_password_hash
+from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
 
 class TransactionService:
     def __init__(self):
@@ -15,6 +17,34 @@ class TransactionService:
             return get_jwt().get('name', 'Sistema')
         except:
             return 'Sistema'
+
+    def _usuario_logado(self):
+        """O User de verdade (precisa dele para conferir a senha na exclusao).
+        Mesmo jeito usado em check_service e client_service."""
+        try:
+            verify_jwt_in_request(optional=True)
+            ident = get_jwt_identity()
+        except Exception:
+            return None
+        if ident is not None and str(ident).isdigit():
+            return db.session.get(User, int(ident))
+        return None
+
+    def _vinculo(self, t):
+        """De onde a linha veio: baixa de cheque, bordero ou lancamento a mao.
+        Apagar uma linha vinculada deixa o cheque 'Pago' sem o dinheiro no caixa -
+        por isso o vinculo vai para a tela (aviso) e para a auditoria."""
+        if t.check_id:
+            c = db.session.get(Check, t.check_id)
+            if c:
+                return f"recebimento do cheque #{c.number or 'S/N'} ({c.issuer_name or 'sem emitente'})"
+            return f"recebimento de cheque (#{t.check_id}, ja apagado)"
+        if t.operation_id:
+            op = db.session.get(Operation, t.operation_id)
+            if op:
+                return f"borderô #{op.id} de {op.client_name_snapshot or 'cliente'}"
+            return f"borderô #{t.operation_id} (ja apagado)"
+        return None
 
     def update_initial_balances(self, data):
         """
@@ -194,24 +224,39 @@ class TransactionService:
                              f"Editou lançamento #{id}: {antiga_desc} (R$ {antigo_valor}) -> {t.description} (R$ {t.amount})")
         return self._serialize(t)
     
-    def delete(self, id):
+    def delete(self, id, senha=None):
+        """
+        Apaga um lancamento do caixa. Exige a SENHA de quem esta logado - o mesmo
+        2o fator da edicao de cheque e da mesclagem de cliente.
+
+        Motivo: apagar uma linha do caixa muda o saldo do banco na hora e NAO tem
+        desfazer. A auditoria guarda o retrato completo da linha apagada (data,
+        valor, tipo, conta, categoria e de onde ela veio) - e o unico caminho de volta.
+        """
         t = Transaction.query.get(id)
-        if not t: 
-            return False
-        
-        info = f"{t.description} (R$ {t.amount})"
-        
+        if not t:
+            return False, "Lançamento não encontrado"
+
+        usuario = self._usuario_logado()
+        if not usuario or not check_password_hash(usuario.password_hash, str(senha or '')):
+            self.audit.log_action(self._get_current_user(), 'NEGADO', 'FluxoCaixa',
+                                  f"Senha incorreta ao tentar apagar o lançamento #{id}: "
+                                  f"{t.description} (R$ {t.amount})")
+            raise PermissionError("Senha incorreta - o lançamento não foi apagado")
+
+        vinculo = self._vinculo(t)
+        retrato = (f"Apagou lançamento #{t.id}: {t.description} | "
+                   f"R$ {t.amount} | {t.type} | conta: {t.origin} | "
+                   f"categoria: {t.category or '-'} | "
+                   f"data: {t.date.strftime('%d/%m/%Y') if t.date else '-'}")
+        if vinculo:
+            retrato += f" | VINCULADO A: {vinculo}"
+
         db.session.delete(t)
         db.session.commit()
-        
-      
-        self.audit.log_action(
-            self._get_current_user(), 
-            'DELETE', 
-            'FluxoCaixa', 
-            f"Apagou lançamento: {info}"
-        )
-        return True
+
+        self.audit.log_action(self._get_current_user(), 'DELETE', 'FluxoCaixa', retrato)
+        return True, None
 
     def _serialize(self, t):
         return {
@@ -221,5 +266,10 @@ class TransactionService:
             'valor': t.amount,
             'tipo': t.type,
             'origem': t.origin,
-            'category': t.category
+            'category': t.category,
+            # cheque de origem: o caixa usa para agrupar as partes de um recebimento
+            # dividido (mesmo cheque, contas diferentes) numa linha so visualmente
+            'check_id': t.check_id,
+            # a tela avisa antes de apagar uma linha que veio de um cheque/bordero
+            'operation_id': t.operation_id
         }

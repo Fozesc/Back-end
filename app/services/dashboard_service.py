@@ -65,7 +65,22 @@ class DashboardService:
     
         evolution = self._get_evolution_data(period)
 
+        # Vencimentos de HOJE. De proposito NAO acumula o que venceu antes: o Lucas
+        # pediu aviso so do dia, senao vira uma lista de cobranca que cresce sozinha
+        # e ele para de olhar. Quem quer o historico usa a tela de Cheques.
+        hoje = datetime.now().date()
+        qtd_hoje, total_hoje = db.session.query(
+            func.count(Check.id), func.coalesce(func.sum(Check.amount), 0.0)
+        ).filter(Check.due_date == hoje,
+                 Check.status.in_(['Aguardando', 'Prorrogado']),
+                 Check.fora_do_calculo.is_(False)).one()
+
         return {
+            'vencem_hoje': {
+                'data': hoje.strftime('%Y-%m-%d'),
+                'quantidade': int(qtd_hoje or 0),
+                'total': round(float(total_hoje or 0), 2),
+            },
             'kpis': {
                 'capital': capital, 'lucro': lucro,
                 'carteira': carteira, 'inadimplencia': inadimplencia

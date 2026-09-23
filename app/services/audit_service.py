@@ -29,7 +29,21 @@ class AuditService:
             db.session.rollback()
             print(f"Falha ao salvar audit: {e}")
 
-    def get_paginated(self, page, per_page, search=None, action=None, date_start=None, date_end=None):
+    def get_filtros(self):
+        """Acoes e alvos que existem de verdade no banco.
+
+        A tela oferecia so CREATE/UPDATE/DELETE/LOGIN escritos a mao no Vue, entao
+        NEGADO (senha errada), BAIXA, MERGE e LOGOUT nao tinham como ser filtrados -
+        justamente os que mais interessam numa auditoria. Vindo do banco, acao nova
+        aparece sozinha na tela."""
+        acoes = [a for (a,) in db.session.query(AuditLog.action)
+                 .filter(AuditLog.action.isnot(None)).distinct().order_by(AuditLog.action)]
+        alvos = [t for (t,) in db.session.query(AuditLog.target)
+                 .filter(AuditLog.target.isnot(None)).distinct().order_by(AuditLog.target)]
+        return {'acoes': acoes, 'alvos': alvos}
+
+    def get_paginated(self, page, per_page, search=None, action=None, date_start=None,
+                      date_end=None, target=None):
         query = AuditLog.query
 
         if search:
@@ -44,6 +58,9 @@ class AuditService:
 
         if action and action != 'TODOS':
             query = query.filter(AuditLog.action == action)
+
+        if target and target != 'TODOS':
+            query = query.filter(AuditLog.target == target)
 
         if date_start:
             query = query.filter(AuditLog.timestamp >= date_start)

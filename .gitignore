@@ -31,7 +31,7 @@ import_logs/
 import_logs*/
 teste_prod/
 teste_final/
-relatorio_*.csv
+*.csv
 
 # --- IMPORTACAO DA PLANILHA: nada disso vai para o GitHub ---
 # Os scripts de importacao ficam SO na maquina do Lucas. Para rodar no servidor,

@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y \
     postgresql-client \
     gcc \
     curl \
-    docker.io \
     && rm -rf /var/lib/apt/lists/*
 # postgresql-client traz o binario pg_dump. Sem ele o gerar_backup.py rodava
 # "pg_dump | gzip", o pg_dump nao existia, mas o codigo de saida do pipe e o do

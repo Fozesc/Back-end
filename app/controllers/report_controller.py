@@ -1,4 +1,4 @@
-from flask import Blueprint, request, send_file
+from flask import Blueprint, request, send_file, jsonify
 from flask_jwt_extended import jwt_required
 from app.services.report_service import ReportService
 import os
@@ -25,3 +25,18 @@ def export_custom():
         as_attachment=True, 
         download_name=os.path.basename(filepath)
     )
+
+@bp.route('/resumo', methods=['GET'])
+@jwt_required()
+def resumo():
+    """Numeros do relatorio gerencial que a tela imprime. Antes a tela nao chamava
+    nada: imprimia valores fixos escritos no Vue."""
+    try:
+        dados = service.gerar_resumo(
+            request.args.get('tipo'),
+            request.args.get('inicio'),
+            request.args.get('fim'),
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify(dados)

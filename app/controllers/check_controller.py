@@ -46,32 +46,50 @@ def definir_calculo():
         return jsonify(result), 200
     return jsonify({'error': result}), 400
 
+@bp.route('/emitentes', methods=['GET'])
+@jwt_required()
+def emitentes():
+    """Sugestoes para o campo Emitente (os mais usados primeiro)."""
+    return jsonify(service.listar_emitentes(request.args.get('q'),
+                                            request.args.get('limit', 10, type=int)))
+
+
 @bp.route('/portfolio-total', methods=['GET'])
 @jwt_required()
 def portfolio_total():
     return jsonify(service.get_portfolio_total())
 
+# Chaves de `payment_data` que o servico entende. Whitelist para nada mais do JSON
+# entrar por engano na baixa (ex.: mandar 'status' ou campo do cheque por dentro).
+CAMPOS_PAGAMENTO = ('method', 'forma', 'amount', 'taxa_multa', 'partes')
+
+
 @bp.route('/<int:id>/status', methods=['PATCH'])
 @jwt_required()
 def update_status(id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     new_status = data.get('status')
-    
-    payment_data = None
-    if new_status == 'Pago':
-        payment_data = {
-            'amount': data.get('paid_amount'),
-            'method': data.get('payment_method')
-        }
 
     if not new_status:
         return jsonify({'error': 'Status é obrigatório'}), 400
-        
-    result = service.update_status(id, new_status, payment_data)
-    
+
+    payment_data = {k: v for k, v in (data.get('payment_data') or {}).items()
+                    if k in CAMPOS_PAGAMENTO}
+    # formato antigo (campos no topo do JSON) continua aceito
+    for topo, dentro in (('paid_amount', 'amount'), ('payment_method', 'method'),
+                         ('taxa_multa', 'taxa_multa')):
+        if data.get(topo) is not None:
+            payment_data.setdefault(dentro, data[topo])
+
+    try:
+        result = service.update_status(id, new_status, payment_data)
+    except ValueError as e:
+        # recebimento dividido invalido (soma nao fecha, conta desconhecida, etc.)
+        return jsonify({'error': str(e)}), 400
+
     if not result:
-        return jsonify({'error': 'Erro ao atualizar status'}), 400
-        
+        return jsonify({'error': 'Cheque não encontrado'}), 404
+
     return jsonify({'message': 'Status atualizado com sucesso'})
 
 @bp.route('/<int:id>/prorrogate', methods=['POST'])

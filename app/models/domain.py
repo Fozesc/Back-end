@@ -152,6 +152,12 @@ class Transaction(db.Model):
     origin = db.Column(db.String(50)) 
     category = db.Column(db.String(50))
     operation_id = db.Column(db.Integer, db.ForeignKey('operations.id'), nullable=True)
+    # Cheque que gerou o lancamento. Existe porque um recebimento pode ser DIVIDIDO
+    # (parte no dinheiro, parte no banco): cada parte e' uma linha no caixa e o
+    # check_id e' o que amarra as linhas ao mesmo cheque (e o que desfaz a baixa sem
+    # depender de casar texto de descricao). Fica NULL no que nao e' de um cheque so
+    # (borderô, lancamento manual) e nas linhas antigas.
+    check_id = db.Column(db.Integer, db.ForeignKey('checks.id', ondelete='SET NULL'), nullable=True)
 
 
 class CheckExtension(db.Model):

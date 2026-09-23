@@ -14,5 +14,14 @@ def index():
     date_start = request.args.get('date_start', '', type=str)
     date_end = request.args.get('date_end', '', type=str)
 
-    data = service.get_paginated(page, per_page, search, action, date_start, date_end)
+    target = request.args.get('target', '', type=str)
+
+    data = service.get_paginated(page, per_page, search, action, date_start, date_end, target)
     return jsonify(data)
+
+
+@bp.route('/filtros', methods=['GET'])
+@jwt_required()
+def filtros():
+    """Acoes e alvos existentes, para a tela montar os filtros sem lista fixa."""
+    return jsonify(service.get_filtros())

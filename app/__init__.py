@@ -70,6 +70,12 @@ def create_app():
             'ALTER TABLE checks ADD COLUMN IF NOT EXISTS fora_do_calculo '
             'BOOLEAN NOT NULL DEFAULT FALSE'
         ))
+        # transactions.check_id: liga a linha do caixa ao cheque. ON DELETE SET NULL
+        # para apagar um cheque nao travar na FK nem apagar o historico do caixa.
+        db.session.execute(text(
+            'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS check_id INTEGER '
+            'REFERENCES checks(id) ON DELETE SET NULL'
+        ))
         db.session.commit()
 
 

@@ -10,6 +10,25 @@ MESES_PT = [
 ]
 
 
+def bank_key(origin):
+    """Classifica a conta pelo TEXTO de Transaction.origin - mesma regra do
+    transaction_service.get_balances. E funcao de modulo porque o relatorio
+    gerencial tambem precisa dela: uma regra so, para os numeros baterem."""
+    o = (origin or "").upper()
+    if 'BRASIL' in o or 'BB' in o:
+        return 'BRASIL'
+    if 'CAIXA' in o or 'CEF' in o:
+        return 'CAIXA'
+    return 'DINHEIRO'
+
+
+NOME_CONTA = {
+    'BRASIL': 'Banco do Brasil',
+    'CAIXA': 'Caixa Econômica',
+    'DINHEIRO': 'Dinheiro',
+}
+
+
 class HistoryService:
     """
     Histórico mensal do caixa — é apenas uma CONSULTA (não salva/fecha nada).
@@ -27,13 +46,7 @@ class HistoryService:
         return start, date(year, month, last_day)
 
     def _bank_key(self, origin):
-        """Mesma classificação de conta usada em transaction_service.get_balances."""
-        o = (origin or "").upper()
-        if 'BRASIL' in o or 'BB' in o:
-            return 'BRASIL'
-        if 'CAIXA' in o or 'CEF' in o:
-            return 'CAIXA'
-        return 'DINHEIRO'
+        return bank_key(origin)
 
     # ------------------------------------------------------------------ #
     # Resumo do mês (usado na lista de meses e no detalhe)
