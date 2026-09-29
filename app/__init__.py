@@ -62,20 +62,26 @@ def create_app():
         db.create_all()
         # ponytail: este projeto nao usa Alembic (nao existe pasta migrations/) e o
         # create_all() cria tabela nova mas NUNCA altera tabela que ja existe. Por isso
-        # a coluna nova entra por um ALTER idempotente aqui: roda em todo boot, nao
-        # precisa de passo manual no servidor. Se aparecer uma 3a coluna, vale adotar
-        # o Flask-Migrate (ja esta instalado) em vez de empilhar ALTERs aqui.
+        # coluna nova entra por ALTER idempotente aqui: roda em todo boot e nao precisa
+        # de passo manual no servidor (o deploy e' so `docker compose pull && up -d`).
+        # So aditivo (ADD COLUMN IF NOT EXISTS). Adotar o Flask-Migrate (ja instalado)
+        # exige carimbar o banco do servidor e rodar upgrade no deploy - vale quando
+        # precisar de algo alem de coluna nova (renomear, mudar tipo, apagar).
         from sqlalchemy import text
-        db.session.execute(text(
+        for comando in (
             'ALTER TABLE checks ADD COLUMN IF NOT EXISTS fora_do_calculo '
-            'BOOLEAN NOT NULL DEFAULT FALSE'
-        ))
-        # transactions.check_id: liga a linha do caixa ao cheque. ON DELETE SET NULL
-        # para apagar um cheque nao travar na FK nem apagar o historico do caixa.
-        db.session.execute(text(
+            'BOOLEAN NOT NULL DEFAULT FALSE',
+            # liga a linha do caixa ao cheque. ON DELETE SET NULL para apagar um cheque
+            # nao travar na FK nem apagar o historico do caixa.
             'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS check_id INTEGER '
-            'REFERENCES checks(id) ON DELETE SET NULL'
-        ))
+            'REFERENCES checks(id) ON DELETE SET NULL',
+            # prorrogacao com recebimento parcial
+            'ALTER TABLE checks ADD COLUMN IF NOT EXISTS original_amount DOUBLE PRECISION',
+            'ALTER TABLE checks ADD COLUMN IF NOT EXISTS juros_pendentes '
+            'DOUBLE PRECISION NOT NULL DEFAULT 0',
+            'ALTER TABLE check_extensions ADD COLUMN IF NOT EXISTS detalhe JSON',
+        ):
+            db.session.execute(text(comando))
         db.session.commit()
 
 

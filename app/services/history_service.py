@@ -83,8 +83,10 @@ class HistoryService:
          .filter(Operation.operation_date >= start, Operation.operation_date <= end,
                  Check.fora_do_calculo.is_(False)).scalar() or 0.0
 
+        # valor de face de quando operou: prorrogacao/recebimento parcial mudam o
+        # `amount` de hoje, nao o que foi operado naquele mes
         total_operado = db.session.query(
-            func.coalesce(func.sum(Check.amount), 0.0)
+            func.coalesce(func.sum(func.coalesce(Check.original_amount, Check.amount)), 0.0)
         ).join(Operation, Check.operation_id == Operation.id)\
          .filter(Operation.operation_date >= start, Operation.operation_date <= end,
                  Check.fora_do_calculo.is_(False)).scalar() or 0.0

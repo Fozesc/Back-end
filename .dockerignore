@@ -23,7 +23,7 @@ README.md
 # docker cp (o passo esta no COMO_IMPORTAR.md, que tambem fica so na sua maquina).
 import_planilha.py
 COMO_IMPORTAR.md
-test_import_clientes.py
+test_import_*.py
 inport/
 conferido*.xlsx
 *.xlsx

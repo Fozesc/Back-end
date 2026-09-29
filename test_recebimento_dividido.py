@@ -194,9 +194,12 @@ def main():
         with app.app_context():
             assert Transaction.query.filter_by(check_id=id_b).count() == 1
 
-        # ------- multa de devolucao convive com taxa de prorrogacao (mesma categoria)
+        # ------- multa de devolucao convive com juros de prorrogacao (mesma categoria)
+        # prorroga pagando os R$ 10 de juros na hora: vira linha 'Multas e Juros'
         r = http.post(f'/api/checks/{id_c}/prorrogate', headers=cab,
-                      json={'new_date': '2026-12-05', 'fee_amount': 10.0, 'method': 'BB'})
+                      json={'prorrogar': True, 'new_date': '2026-12-05', 'novos_juros': 10.0,
+                            'taxa_mensal': 4, 'dias_compensacao': 2, 'iof': False,
+                            'valor_recebido': 10.0, 'conta': 'BB'})
         assert r.status_code == 200, r.data
         r = baixa(id_c, {'status': 'Devolvido', 'payment_data': {'method': 'Dinheiro', 'taxa_multa': 2.0}})
         assert r.status_code == 200, r.data
@@ -206,8 +209,8 @@ def main():
         assert r.status_code == 200, r.data
         with app.app_context():
             restantes = Transaction.query.filter_by(check_id=id_c).all()
-            assert len(restantes) == 1 and restantes[0].description.startswith('Taxa Prorrogação'), \
-                f"a taxa de prorrogacao tinha que ficar: {[t.description for t in restantes]}"
+            assert len(restantes) == 1 and restantes[0].description.startswith('Juros de prorrogação'), \
+                f"o juros de prorrogacao tinha que ficar: {[t.description for t in restantes]}"
             assert db.session.get(Check, id_c).fine_amount == 0.0
 
         # ------------------- lancamento ANTIGO (sem check_id) ainda e' desfeito

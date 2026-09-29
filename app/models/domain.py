@@ -116,7 +116,14 @@ class Check(db.Model):
 
     due_date = db.Column(db.Date, nullable=False) # Essa data muda se prorrogar
     
-    amount = db.Column(db.Float, nullable=False)        # Valor de Face
+    amount = db.Column(db.Float, nullable=False)        # Valor devido hoje (muda com prorrogacao/recebimento parcial)
+    # Valor de face quando o cheque entrou. Fica NULL ate a 1a mudanca do `amount`;
+    # relatorio por data de operacao ("total operado") usa este, nao o saldo de hoje.
+    original_amount = db.Column(db.Float, nullable=True)
+    # Parte do `amount` que e' juros de prorrogacao ainda nao pago. Recebimento paga
+    # isto primeiro e so depois abate o principal.
+    juros_pendentes = db.Column(db.Float, nullable=False, default=0.0,
+                                server_default=db.text('0'))
     interest_amount = db.Column(db.Float, default=0.0)  # Juros originais
     net_amount = db.Column(db.Float, default=0.0)       # Valor Líquido
     
@@ -176,9 +183,13 @@ class CheckExtension(db.Model):
     
     status = db.Column(db.String(20), default='PENDENTE') # PENDENTE ou PAGO
     notes = db.Column(db.Text)
+    # Retrato do calculo gravado (recebido, juros pagos, principal abatido, saldo,
+    # taxa, dias, novos juros, novo total...). E' o que o historico mostra.
+    detalhe = db.Column(db.JSON, nullable=True)
 
   
-    check = db.relationship('Check', backref=db.backref('extensions', lazy=True, cascade="all, delete-orphan"))
+    check = db.relationship('Check', backref=db.backref('extensions', lazy=True, cascade="all, delete-orphan",
+                                                        order_by='CheckExtension.id'))
 
 #block de logout
 class TokenBlocklist(db.Model):
