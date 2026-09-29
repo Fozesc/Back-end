@@ -269,7 +269,7 @@ class ReportService:
         # diferentes - quanto entrou x quanto foi vendido no periodo.
         gerado, operado, qtd = db.session.query(
             func.coalesce(func.sum(Check.interest_amount), 0.0),
-            func.coalesce(func.sum(Check.amount), 0.0),
+            func.coalesce(func.sum(func.coalesce(Check.original_amount, Check.amount)), 0.0),
             func.count(func.distinct(Operation.id)),
         ).select_from(Check).join(Operation, Check.operation_id == Operation.id)\
          .filter(Operation.operation_date >= d1, Operation.operation_date <= d2,

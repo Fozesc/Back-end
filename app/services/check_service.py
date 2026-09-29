@@ -3,9 +3,10 @@ from app import db
 from app.services.audit_service import AuditService
 from app.utils.sanitizer import sanitize_input
 from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
-from sqlalchemy import or_, and_, desc, asc, func
+from sqlalchemy import or_, and_, desc, asc, func, case
+import math
+import re
 from datetime import datetime, date
-from flask import request
 from werkzeug.security import check_password_hash
 
 # Marca que o import_planilha.py grava em Operation.notes. E' assim que o sistema
@@ -28,6 +29,9 @@ FORMAS_PAGAMENTO = ('Dinheiro', 'PIX', 'TED/DOC', 'Depósito', 'Cheque', 'Outro'
 
 # Teto de partes num recebimento dividido (evita payload absurdo virar 500 linhas no caixa)
 MAX_PARTES = 10
+
+# teto da lista de titulos do mesmo borderô na tela de detalhes
+LIMITE_PARCELAS = 100
 
 class CheckService:
     def __init__(self):
@@ -238,12 +242,13 @@ class CheckService:
 
         if date_start:
             hoje = date.today()
-           
+            # vencido que ainda nao foi recebido nao some por causa do "De":
+            # Juridico e Prorrogado vencido tambem (antes sumiam, e a soma nao batia)
             query = query.filter(
                 or_(
                     Check.due_date >= date_start,
-                    and_(Check.status == 'Aguardando', Check.due_date < hoje),
-                    Check.status.in_(['Atrasado', 'Devolvido'])
+                    and_(Check.status.in_(['Aguardando', 'Prorrogado']), Check.due_date < hoje),
+                    Check.status.in_(['Atrasado', 'Devolvido', 'Juridico'])
                 )
             )
             
@@ -280,7 +285,35 @@ class CheckService:
             'items': items_serializados,
             'total': pagination.total,
             'pages': pagination.pages,
-            'current_page': page
+            'current_page': page,
+            'resumo': self._resumo(search, status, date_start, date_end, calculo),
+        }
+
+    def _resumo(self, search, status, date_start, date_end, calculo):
+        """Soma de TODOS os cheques do filtro (nao so da pagina), por status, no banco.
+        Aguardando vencido aparece como Atrasado, igual na lista."""
+        situacao = case((and_(Check.status == 'Aguardando', Check.due_date < date.today()), 'Atrasado'),
+                        else_=Check.status)
+        linhas = (self._montar_query(search, status, date_start, date_end, calculo)
+                  .with_entities(situacao, Check.fora_do_calculo, func.count(Check.id), func.sum(Check.amount))
+                  .group_by(situacao, Check.fora_do_calculo).all())
+        por_status = {}
+        fora = {'qtd': 0, 'valor': 0.0}
+        for st, fora_calc, qtd, valor in linhas:
+            s = por_status.setdefault(st, {'status': st, 'qtd': 0, 'valor': 0.0})
+            s['qtd'] += qtd
+            s['valor'] += valor or 0.0
+            if fora_calc:
+                fora['qtd'] += qtd
+                fora['valor'] += valor or 0.0
+        itens = sorted(por_status.values(), key=lambda s: -s['valor'])
+        for s in itens:
+            s['valor'] = round(s['valor'], 2)
+        return {
+            'qtd': sum(s['qtd'] for s in itens),
+            'valor': round(sum(s['valor'] for s in itens), 2),
+            'por_status': itens,
+            'fora': {'qtd': fora['qtd'], 'valor': round(fora['valor'], 2)},
         }
 
     def definir_calculo(self, fora, ids=None, filtros=None):
@@ -539,63 +572,194 @@ class CheckService:
 
         return check
 
-    def prorrogate_check(self, check_id, new_date_str, fee_amount, notes):
-        check = Check.query.get(check_id)
-        if not check: return False, "Título não encontrado"
+    def _valor(self, bruto, campo):
+        try:
+            v = round(float(bruto), 2)
+        except (TypeError, ValueError):
+            raise ValueError(f"{campo}: valor inválido")
+        if not math.isfinite(v) or v < 0:
+            raise ValueError(f"{campo}: valor inválido")
+        return v
+
+    def prorrogate_check(self, check_id, dados):
+        """Prorrogacao do titulo (com ou sem pagamento na hora), numa operacao so.
+
+        1. Juros desta prorrogacao = conta do Borderô de Liquido (Inverso) sobre o saldo
+           devido, ate a nova data. Vem da tela (Front-end/src/utils/calculoBordero.js);
+           o backend nao repete a formula - pode ter sido ajustada a mao - e so exige >= 0.
+        2. O que o cliente paga agora quita primeiro esses juros e o que passar abate o
+           saldo. Se nao cobrir os juros, a diferenca soma no valor devido.
+        3. Novo valor devido = saldo + juros - pago: vira o `amount` do titulo.
+        Sem prorrogar (so pagamento parcial) nao ha juros: o pago abate o saldo direto.
+        Caixa, titulo, historico e auditoria gravam juntos ou nada grava.
+        """
+        check = db.session.get(Check, check_id)
+        if not check:
+            return None
+        if check.status == 'Pago':
+            raise ValueError("Título já está pago")
+
+        hoje = date.today()
+        total = round(float(check.amount or 0), 2)
+
+        saldo_base = total
+        if dados.get('saldo_base') not in (None, ''):
+            saldo_base = self._valor(dados['saldo_base'], 'Saldo para o cálculo')
+        if saldo_base <= 0:
+            raise ValueError("Saldo para o cálculo tem que ser maior que zero")
+        ajuste = round(saldo_base - total, 2)
+
+        prorrogar = bool(dados.get('prorrogar'))
+        venc_atual = check.due_date
+        nova = venc_atual
+        juros = 0.0
+        calculo = {}
+        if prorrogar:
+            nova = self._data(dados.get('new_date'), 'Nova data de vencimento')
+            data_base = self._data(dados.get('data_base') or venc_atual.isoformat(), 'Data base')
+            if nova <= venc_atual:
+                raise ValueError(f"A nova data tem que ser depois do vencimento atual "
+                                 f"({venc_atual.strftime('%d/%m/%Y')})")
+            if nova <= data_base:
+                raise ValueError("A nova data tem que ser depois da data base do cálculo")
+            juros = self._valor(dados.get('novos_juros') or 0, 'Juros da prorrogação')
+            taxa = self._valor(dados.get('taxa_mensal') or 0, 'Taxa')
+            if taxa > 100:
+                raise ValueError("Taxa: valor inválido")
+            try:
+                dias_comp = int(dados.get('dias_compensacao') or 0)
+            except (TypeError, ValueError):
+                raise ValueError("Dias de compensação inválidos")
+            if not 0 <= dias_comp <= 30:
+                raise ValueError("Dias de compensação inválidos")
+            calculo = {
+                'data_base': data_base.isoformat(),
+                'taxa_mensal': taxa,
+                'dias_compensacao': dias_comp,
+                'iof': bool(dados.get('iof')),
+                'dias': (nova - data_base).days + dias_comp,
+                'juros_calculado': (self._valor(dados['juros_calculado'], 'Juros calculado')
+                                    if dados.get('juros_calculado') not in (None, '') else None),
+            }
+        total_com_juros = round(saldo_base + juros, 2)
+
+        recebido = self._valor(dados.get('valor_recebido') or 0, 'Valor pago')
+        if recebido > total_com_juros:
+            raise ValueError(f"Pago (R$ {recebido:.2f}) maior que o devido (R$ {total_com_juros:.2f})")
+        if recebido == total_com_juros:
+            raise ValueError("O valor pago quita o título inteiro: use o botão Receber")
+        if not prorrogar and not recebido and not ajuste:
+            raise ValueError("Nada para registrar: informe o valor pago ou a nova data")
+        conta = None
+        partes = []
+        data_recebimento = hoje
+        if recebido > 0:
+            if dados.get('partes'):
+                # dividido (parte no dinheiro, parte no banco): mesma regra do Receber
+                partes = self._validar_partes(dados['partes'], recebido)
+                contas = list(dict.fromkeys(c for c, _, _ in partes))
+                conta = contas[0] if len(contas) == 1 else f"Múltiplo ({' + '.join(contas)})"
+            else:
+                conta = str(dados.get('conta') or '').strip()
+                if conta not in CONTAS_CAIXA:
+                    raise ValueError(f"Conta inválida (use {', '.join(CONTAS_CAIXA)})")
+                partes = [(conta, str(dados.get('forma') or '').strip(), recebido)]
+            data_recebimento = self._data(dados.get('data_recebimento') or hoje.isoformat(),
+                                          'Data do pagamento')
+            if data_recebimento > hoje:
+                raise ValueError("Data do pagamento não pode ser no futuro")
+
+        if ajuste:
+            # mudar o que o cliente deve sem dinheiro entrar: mesmo 2o fator da edicao
+            usuario = self._usuario_logado()
+            if not usuario or not check_password_hash(usuario.password_hash, str(dados.get('senha') or '')):
+                self.audit.log_action(self._get_current_user(), 'NEGADO', 'Cheque',
+                                      f"Senha incorreta ao ajustar o saldo do cheque #{check.number or 'S/N'} "
+                                      f"({check.issuer_name}) de R$ {total:.2f} para R$ {saldo_base:.2f}")
+                raise PermissionError("Senha incorreta - nada foi gravado")
+
+        juros_pagos = min(recebido, juros)
+        abatido = round(recebido - juros_pagos, 2)
+        juros_nao_pagos = round(juros - juros_pagos, 2)
+        novo_total = round(total_com_juros - recebido, 2)
+        # so informativo: quanto do valor devido e' juros que ficou sem pagar
+        pendentes = min(max(float(check.juros_pendentes or 0), 0.0), saldo_base)
+        juros_pendentes = round(max(pendentes - abatido, 0.0) + juros_nao_pagos, 2)
+        numero, emitente = check.number or 'S/N', check.issuer_name or ''
 
         try:
-            old_date = check.due_date
-            new_date_obj = datetime.strptime(new_date_str, '%Y-%m-%d').date()
+            # cada parte paga primeiro o que falta dos juros e o resto abate o saldo:
+            # o caixa fica certo por conta E por categoria
+            falta_juros = juros_pagos
+            for i, (conta_parte, forma, valor_parte) in enumerate(partes, 1):
+                de_juros = round(min(valor_parte, falta_juros), 2)
+                falta_juros = round(falta_juros - de_juros, 2)
+                rotulo_parte = ([f"Parte {i}/{len(partes)}"] if len(partes) > 1 else []) \
+                    + ([forma] if forma and forma != conta_parte else [])
+                sufixo = f" ({' · '.join(rotulo_parte)})" if rotulo_parte else ''
+                for valor, categoria, rotulo in ((de_juros, 'Multas e Juros', 'Juros de prorrogação'),
+                                                 (round(valor_parte - de_juros, 2), 'Recebimento Parcial',
+                                                  'Recebimento parcial')):
+                    if valor > 0:
+                        db.session.add(Transaction(
+                            date=data_recebimento, amount=valor, type='entrada', origin=conta_parte,
+                            description=f"{rotulo} - Cheque #{numero} - {emitente}{sufixo}"[:200],
+                            category=categoria, operation_id=check.operation_id, check_id=check.id))
 
-            if hasattr(check, 'original_due_date') and not check.original_due_date:
-                check.original_due_date = old_date
+            if check.original_amount is None and novo_total != total:
+                check.original_amount = total
+            check.amount = novo_total
+            check.juros_pendentes = juros_pendentes
+            if prorrogar:
+                if not check.original_due_date:
+                    check.original_due_date = venc_atual
+                check.due_date = nova
+                check.status = 'Prorrogado'
 
-            fee_amount_float = float(fee_amount) if fee_amount else 0.0
-
-            method = 'Dinheiro'
-            try:
-                req_data = request.get_json(silent=True)
-                if req_data and 'method' in req_data:
-                    method = req_data['method']
-            except:
-                pass
-
-            extension = CheckExtension(
-                check_id=check.id,
-                old_due_date=old_date,
-                new_due_date=new_date_obj,
-                days_added=(new_date_obj - old_date).days,
-                fee_amount=fee_amount_float,
-                notes=notes,
-                status='PAGO' 
-            )
-            db.session.add(extension)
-
- 
-            if fee_amount_float > 0:
-                desc_tx = f"Taxa Prorrogação Cheque #{getattr(check, 'number', 'S/N')} - {getattr(check, 'issuer_name', '')}"
-                transacao = Transaction(
-                    date=datetime.now().date(),
-                    description=desc_tx[:200],
-                    amount=fee_amount_float,
-                    type='entrada',
-                    origin=method,
-                    category='Multas e Juros',
-                    operation_id=check.operation_id,
-                    check_id=check.id
-                )
-                db.session.add(transacao)
-
-            check.due_date = new_date_obj
-            check.status = 'Prorrogado' 
-            
+            detalhe = {
+                'prorrogar': prorrogar,
+                'valor_anterior': total,
+                'ajuste': ajuste,
+                'saldo_base': saldo_base,
+                'novos_juros': juros,
+                'total_com_juros': total_com_juros,
+                'valor_recebido': recebido,
+                'conta': conta,
+                'partes': [{'conta': c, 'forma': f, 'valor': v} for c, f, v in partes] if len(partes) > 1 else None,
+                'data_recebimento': data_recebimento.isoformat() if recebido else None,
+                'juros_pagos': juros_pagos,
+                'principal_abatido': abatido,
+                'juros_nao_pagos': juros_nao_pagos,
+                'novo_total': novo_total,
+                **calculo,
+            }
+            db.session.add(CheckExtension(
+                check_id=check.id, old_due_date=venc_atual, new_due_date=nova,
+                days_added=(nova - venc_atual).days, fee_amount=juros,
+                notes=sanitize_input(str(dados.get('notes') or ''))[:1000] or None,
+                status='PENDENTE' if juros_nao_pagos > 0 else 'PAGO', detalhe=detalhe))
             db.session.commit()
-            
-            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Cheque', f"Prorrogação Cheque #{getattr(check, 'number', 'S/N')}: {old_date} -> {new_date_str}")
-            return True, "Prorrogação realizada com sucesso"
-        except Exception as e:
+        except Exception:
             db.session.rollback()
-            return False, str(e)
+            raise
+
+        texto = f"Cheque #{numero} ({emitente}): devia R$ {total:.2f}"
+        if ajuste:
+            texto += f" | AJUSTE MANUAL do saldo R$ {total:.2f} -> R$ {saldo_base:.2f}"
+        if prorrogar:
+            texto += (f" | prorrogado {venc_atual.strftime('%d/%m/%Y')} -> {nova.strftime('%d/%m/%Y')}, "
+                      f"{calculo['taxa_mensal']}% a.m., {calculo['dias']} dias, juros R$ {juros:.2f}")
+            if calculo['juros_calculado'] is not None and calculo['juros_calculado'] != juros:
+                texto += f" (sistema calculou R$ {calculo['juros_calculado']:.2f})"
+        if recebido:
+            texto += (f" | pagou R$ {recebido:.2f} em {conta} (juros R$ {juros_pagos:.2f} + "
+                      f"abatido R$ {abatido:.2f})")
+        if juros_nao_pagos:
+            texto += f" | R$ {juros_nao_pagos:.2f} de juros ficaram no saldo"
+        texto += f" | novo valor devido R$ {novo_total:.2f}"
+        self.audit.log_action(self._get_current_user(),
+                              'PRORROGACAO' if prorrogar else 'RECEBIMENTO PARCIAL', 'Cheque', texto)
+        return self._serialize_check(check)
 
     def delete(self, id):
         cheque = Check.query.get(id)
@@ -670,16 +834,26 @@ class CheckService:
             'banco': getattr(c, 'bank', ''),
             'num_doc': getattr(c, 'number', ''),
             'valor_bruto': float(getattr(c, 'amount', 0.0)),
-            'valor_liquido': float(getattr(c, 'net_amount', 0.0)),
-            'juros': float(getattr(c, 'interest_amount', 0.0)),
+            'valor_original': float(c.original_amount if c.original_amount is not None else c.amount),
+            'juros_pendentes': float(c.juros_pendentes or 0.0),
+            'taxa_cliente': (float(c.operation.client.standard_rate)
+                             if c.operation and c.operation.client and c.operation.client.standard_rate is not None
+                             else None),
+            'valor_liquido': float(c.net_amount or 0.0),
+            'juros': float(c.interest_amount or 0.0),
             
             'emissao': (getattr(c, 'issue_date', None) or date.today()).strftime('%Y-%m-%d'),
             'vencimento': (getattr(c, 'due_date', None) or date.today()).strftime('%Y-%m-%d'),
             'vencimento_original': (getattr(c, 'original_due_date', None) or getattr(c, 'due_date', None) or date.today()).strftime('%Y-%m-%d'),
-            'data_entrada': (getattr(c, 'created_at', None) or datetime.now()).strftime('%Y-%m-%d'),
+            # Check nao tem created_at: antes isto era sempre "hoje". Entrada = data do borderô.
+            'data_entrada': (c.operation.operation_date.strftime('%Y-%m-%d')
+                             if getattr(c, 'operation', None) and c.operation.operation_date else None),
+            'dias': c.days,
+            'tipo': c.type,
+            'iof_bordero': bool(c.operation and (c.operation.iof_amount or 0) > 0),
             
             'data_pagamento': c.payment_date.strftime('%Y-%m-%d') if getattr(c, 'payment_date', None) else None,
-            'valor_pago': float(getattr(c, 'paid_amount', 0.0)),
+            'valor_pago': float(c.paid_amount or 0.0),
             'forma_pagamento': getattr(c, 'payment_method', None),
             'partes_pagamento': partes_pagamento,
             'forma_devolucao': forma_devolucao,
@@ -690,23 +864,63 @@ class CheckService:
             'historico_prorrogacao': [self._serialize_extension(e) for e in getattr(c, 'extensions', [])]
         }
 
+    def detalhes(self, id):
+        """Tudo que a tela de detalhes mostra: o titulo, o borderô de origem e os outros
+        titulos do mesmo borderô. Separado da listagem para ela nao pagar essas consultas."""
+        c = db.session.get(Check, id)
+        if not c:
+            return None
+        op = c.operation
+        importado = TAG_IMPORT in (op.notes or '')
+        # a marca do import e o texto fixo dele nao sao observacao de ninguem
+        notas = re.sub(r'\[' + TAG_IMPORT + r':[^\]]*\]\s*(Importado da planilha historica)?\s*\|?\s*',
+                       '', op.notes or '')
+        irmaos = (db.session.query(Check.id, Check.number, Check.due_date, Check.amount, Check.status,
+                                   Check.issuer_name)
+                  .filter(Check.operation_id == op.id)
+                  .order_by(Check.due_date.asc(), Check.id.asc()).limit(LIMITE_PARCELAS).all())
+        total_titulos = Check.query.filter_by(operation_id=op.id).count()
+        return {
+            **self._serialize_check(c),
+            'bordero': {
+                'id': op.id,
+                'data': op.operation_date.strftime('%Y-%m-%d') if op.operation_date else None,
+                'lancado_em': op.created_at.strftime('%Y-%m-%d %H:%M') if op.created_at else None,
+                'taxa_mensal': float(op.monthly_rate or 0),
+                'dias_compensacao': op.compensation_days or 0,
+                'conta_saida': None if importado else op.account_source,
+                'iof': float(op.iof_amount or 0),
+                'valor_total': float(op.total_face_value or 0),
+                'juros_total': float(op.total_interest or 0),
+                'liquido_entregue': float(op.total_net_value or 0),
+                'qtd_titulos': total_titulos,
+                'observacao': notas.strip(),
+                'importado': importado,
+            },
+            'titulos_do_bordero': [{
+                'id': i, 'numero': n, 'vencimento': v.strftime('%Y-%m-%d') if v else None,
+                'valor': float(a or 0), 'status': st, 'emitente': em,
+            } for i, n, v, a, st, em in irmaos],
+        }
+
     def _serialize_extension(self, e):
+        base = {
+            'id': e.id,
+            'data_simulacao': e.prorrogation_date.strftime('%Y-%m-%d') if e.prorrogation_date else None,
+            'de': e.old_due_date.strftime('%Y-%m-%d') if e.old_due_date else None,
+            'para': e.new_due_date.strftime('%Y-%m-%d') if e.new_due_date else None,
+            'dias': e.days_added or 0,
+            'taxa': float(e.fee_amount or 0.0),
+            'observacao': e.notes,
+        }
+        if e.detalhe:
+            return {**base, **e.detalhe, 'forma_pagamento': e.detalhe.get('conta')}
+
+        # prorrogacao do formato antigo: a taxa era paga na hora e a conta so esta no caixa
         tx_prorrog = Transaction.query.filter(
-            Transaction.operation_id == getattr(e, 'check', type('obj', (object,), {'operation_id': None})).operation_id,
+            Transaction.operation_id == e.check.operation_id,
             Transaction.category == 'Multas e Juros',
-            Transaction.amount == getattr(e, 'fee_amount', 0.0),
+            Transaction.amount == (e.fee_amount or 0.0),
             Transaction.description.like("Taxa Prorrogação%")
         ).order_by(Transaction.id.desc()).first()
-        
-        metodo = tx_prorrog.origin if tx_prorrog else 'Dinheiro'
-        data_simulacao = getattr(e, 'created_at', getattr(e, 'old_due_date', datetime.now()))
-
-        return {
-            'id': e.id,
-            'data_simulacao': data_simulacao.strftime('%Y-%m-%d') if data_simulacao else None,
-            'de': getattr(e, 'old_due_date', datetime.now()).strftime('%Y-%m-%d'),
-            'para': getattr(e, 'new_due_date', datetime.now()).strftime('%Y-%m-%d'),
-            'dias': getattr(e, 'days_added', 0),
-            'taxa': float(getattr(e, 'fee_amount', 0.0)),
-            'forma_pagamento': metodo 
-        }
+        return {**base, 'forma_pagamento': tx_prorrog.origin if tx_prorrog else 'Dinheiro'}

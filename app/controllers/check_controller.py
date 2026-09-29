@@ -95,21 +95,28 @@ def update_status(id):
 @bp.route('/<int:id>/prorrogate', methods=['POST'])
 @jwt_required()
 def prorrogate(id):
-    data = request.get_json()
-    
-    new_date = data.get('new_date')
-    fee = data.get('fee_amount', 0.0)
-    notes = data.get('notes', '')
+    """Recebimento parcial e/ou prorrogacao. Devolve o titulo como ficou gravado."""
+    data = request.get_json(silent=True) or {}
+    if 'fee_amount' in data and 'novos_juros' not in data:
+        return jsonify({'error': 'Tela desatualizada: recarregue a página (Ctrl+F5) e tente de novo'}), 400
+    try:
+        cheque = service.prorrogate_check(id, data)
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if cheque is None:
+        return jsonify({'error': 'Título não encontrado'}), 404
+    return jsonify(cheque)
 
-    if not new_date:
-        return jsonify({'error': 'Nova data é obrigatória'}), 400
-
-    success, message = service.prorrogate_check(id, new_date, fee, notes)
-    
-    if not success:
-        return jsonify({'error': message}), 400
-        
-    return jsonify({'message': message})
+@bp.route('/<int:id>', methods=['GET'])
+@jwt_required()
+def detalhes(id):
+    """Titulo com o borderô de origem, os outros titulos dele e o historico."""
+    dados = service.detalhes(id)
+    if dados is None:
+        return jsonify({'error': 'Título não encontrado'}), 404
+    return jsonify(dados)
 
 @bp.route('/<int:id>', methods=['DELETE'])
 @jwt_required()
