@@ -1,45 +1,38 @@
 from datetime import datetime
 import math
+import sys
 from app import db
-from app.models.domain import Operation, Check, Transaction, Client
+from app.models.domain import Operation, Check, Transaction, Client, CompanySettings
 from flask_jwt_extended import get_jwt
 from app.services.audit_service import AuditService
 from sqlalchemy import asc, desc
 from sqlalchemy.orm import joinedload
 
+# Conta do borderô: a MESMA da tela (Front-end/src/utils/calculoBordero.js, calcularLinha).
+# Antes o servidor recalculava cada cheque com outra formula (liquido = valor / fator) e
+# gravava um juros menor que o da tela. Agora a tela e o servidor fazem a mesma conta.
+
+def arredondar(valor):
+    """Igual ao arredondar() da tela: Math.round((v + EPSILON) * 100) / 100 (meio centavo sobe)."""
+    return math.floor((valor + sys.float_info.epsilon) * 100 + 0.5) / 100
+
+
+def calcular_linha(valor_face, dias, taxa_mensal, iof_ativo=False, iof_base=0.0, iof_diario=0.0):
+    """(juros, iof, liquido) de um titulo, na mesma ordem de contas da tela."""
+    valor_face = float(valor_face or 0)
+    if not valor_face or dias <= 0:
+        return 0.0, 0.0, valor_face
+    fator = math.pow(1 + float(taxa_mensal) / 100, dias / 30.0)
+    juros = arredondar(valor_face * (fator - 1))
+    iof = 0.0
+    if iof_ativo:
+        iof = arredondar(valor_face * (float(iof_base) / 100) + valor_face * (float(iof_diario) / 100) * dias)
+    return juros, iof, arredondar(valor_face - juros - iof)
+
+
 class OperationService:
     def __init__(self):
         self.audit = AuditService()
-    
-    def _calcular_arredondamento_js(self, valor):
-        return int((valor * 100) + 0.5) / 100.0
-
-    def calculate_check_values(self, valor_face, data_base, data_vencimento, taxa_mensal, dias_flutuacao=0):
-        if isinstance(data_base, str):
-            data_base = datetime.strptime(data_base, '%Y-%m-%d').date()
-        if isinstance(data_vencimento, str):
-            data_vencimento = datetime.strptime(data_vencimento, '%Y-%m-%d').date()
-            
-        diff = (data_vencimento - data_base).days
-        dias_totais = diff + int(dias_flutuacao)
-        
-        valor_face = float(valor_face)
-        
-        
-        if dias_totais <= 0:
-            return dias_totais, 0.0, valor_face
-        
-        taxa_decimal = float(taxa_mensal) / 100.0
-        
-
-        total_meses = dias_totais / 30.0
-        fator = math.pow(1 + taxa_decimal, total_meses)
-        
-        valor_liquido_raw = valor_face / fator
-        valor_liquido = self._calcular_arredondamento_js(valor_liquido_raw)
-        valor_juros_final = valor_face - valor_liquido
-        
-        return dias_totais, valor_juros_final, valor_liquido
 
     def create_operation(self, data):
         try:
@@ -74,22 +67,39 @@ class OperationService:
 
             acumulado_face = 0.0
             acumulado_juros = 0.0
+            acumulado_iof = 0.0
             acumulado_liquido = 0.0
             
             checks_audit_list = []
 
-            for item in data['checks']:
+            # IOF como a tela usou; tela antiga (sem esses campos) cai nas configuracoes
+            config = CompanySettings.query.first()
+            iof_ativo = bool(data.get('iof_enabled', float(data.get('iof_amount') or 0) > 0))
+            iof_base = float(data.get('iof_base', config.iof_rate if config else 0.38) or 0)
+            iof_diario = float(data.get('iof_diario', config.iof_daily_rate if config else 0.0041) or 0)
+
+            for n, item in enumerate(data['checks'], 1):
                 valor_face = float(item['valor'])
                 vencimento = item['vencimento']
-                
-                dias, juros, liquido = self.calculate_check_values(
-                    valor_face=valor_face,
-                    data_base=new_operation.operation_date,
-                    data_vencimento=vencimento,
-                    taxa_mensal=new_operation.monthly_rate,
-                    dias_flutuacao=new_operation.compensation_days
-                )
-                
+                venc = datetime.strptime(vencimento, '%Y-%m-%d').date() if isinstance(vencimento, str) else vencimento
+                dias = (venc - new_operation.operation_date).days + dias_comp
+
+                juros, iof, liquido = calcular_linha(valor_face, dias, new_operation.monthly_rate,
+                                                     iof_ativo, iof_base, iof_diario)
+                # A tela manda o que mostrou. Tem que bater com a conta daqui (1 centavo de
+                # folga so para o arredondamento de ponto flutuante JS x Python) - e ai grava
+                # EXATAMENTE o que a tela mostrou, centavo por centavo.
+                if item.get('juros') is not None and item.get('liquido') is not None:
+                    j_tela = round(float(item['juros']), 2)
+                    i_tela = round(float(item.get('iof') or 0), 2)
+                    l_tela = round(float(item['liquido']), 2)
+                    if (abs(j_tela - juros) > 0.011 or abs(i_tela - iof) > 0.011
+                            or abs(round(valor_face - j_tela - i_tela, 2) - l_tela) > 0.011):
+                        raise ValueError(f"Cheque {n}: a conta da tela (juros {j_tela:.2f}, IOF {i_tela:.2f}) "
+                                         f"não confere com o servidor (juros {juros:.2f}, IOF {iof:.2f}). "
+                                         f"Recarregue a página e gere o borderô de novo.")
+                    juros, iof, liquido = j_tela, i_tela, l_tela
+
                 new_check = Check(
                     operation_id=new_operation.id,
                     bank=item.get('banco', ''),
@@ -108,31 +118,17 @@ class OperationService:
                 
                 acumulado_face += valor_face
                 acumulado_juros += juros
+                acumulado_iof += iof
                 acumulado_liquido += liquido
                 
                 checks_audit_list.append(f"[{new_check.bank} R$ {new_check.amount:.2f}]")
 
-            new_operation.total_face_value = acumulado_face
-            new_operation.total_interest = acumulado_juros
-
-            # --- VALOR EFETIVAMENTE EMPRESTADO (o que sai do caixa) ---
-            # Antes o caixa lançava `acumulado_liquido`, que era calculado no backend
-            # SEM descontar o IOF e com uma fórmula (face/fator) diferente da tela.
-            # Resultado: o caixa saía MAIOR que o valor realmente entregue ao cliente
-            # (ex.: emprestava 7000 e lançava ~7031/7050), e o IOF continuava embutido
-            # mesmo com o imposto desligado.
-            # Agora usamos o LÍQUIDO calculado na tela (frontend), que é exatamente o
-            # que o operador vê e entrega = face - juros - IOF.
-            # OBS: NÃO mexe no cálculo de juros. `total_interest` e os juros/valor de
-            # cada cheque continuam idênticos (dashboard/relatórios/dívida inalterados).
-            iof_total = float(data.get('iof_amount') or 0.0)
-            liquido_entregue = data.get('total_net')
-            if liquido_entregue is None:
-                # Retrocompatível: se a tela não enviar o líquido, desconta só o IOF.
-                liquido_entregue = acumulado_liquido - iof_total
-            liquido_entregue = round(float(liquido_entregue), 2)
-
-            new_operation.iof_amount = iof_total
+            new_operation.total_face_value = round(acumulado_face, 2)
+            new_operation.total_interest = round(acumulado_juros, 2)
+            # o que sai do caixa = soma dos liquidos dos cheques = o liquido da tela
+            # (valor - juros - IOF). Tudo sai dos mesmos numeros: nao sobra centavo.
+            liquido_entregue = round(acumulado_liquido, 2)
+            new_operation.iof_amount = round(acumulado_iof, 2)
             new_operation.total_net_value = liquido_entregue
 
             transaction = Transaction(
