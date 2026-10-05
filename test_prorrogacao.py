@@ -138,7 +138,8 @@ def main():
         r = prorrogar(id_a, como_a_tela(p1, '2026-10-01', '2026-10-31'))
         assert r.status_code == 200, r.data
         g = r.get_json()
-        assert g['valor_bruto'] == 1000 and g['vencimento'] == '2026-10-31' and g['status'] == 'Prorrogado'
+        assert g['valor_bruto'] == 1000 and g['vencimento'] == '2026-10-31' and g['status'] == 'Aguardando'
+        assert g['prorrogacoes'] == 1, "prorrogado nao e' status: a marca vem do historico"
         assert estado(id_a)['orig'] is None, "valor nao mudou: original continua vazio"
         h = g['historico_prorrogacao'][-1]
         assert (h['valor_anterior'], h['novos_juros'], h['valor_recebido'], h['juros_pagos'], h['principal_abatido'],
@@ -187,7 +188,7 @@ def main():
         r = prorrogar(id_a, {'prorrogar': False, 'valor_recebido': 100, 'conta': 'Caixa'})
         assert r.status_code == 200, r.data
         d = estado(id_a)
-        assert d['amount'] == round(e['amount'] - 100, 2) and d['venc'] == e['venc'] and d['status'] == 'Prorrogado'
+        assert d['amount'] == round(e['amount'] - 100, 2) and d['venc'] == e['venc'] and d['status'] == 'Aguardando'
         assert d['juros'] == round(max(e['juros'] - 100, 0), 2)
 
         # -------- 5b. pagamento da prorrogacao DIVIDIDO: parte no dinheiro, parte no banco

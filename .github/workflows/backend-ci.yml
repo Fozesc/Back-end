@@ -6,8 +6,70 @@ on:
       - main 
 
 jobs:
+  testes:
+    name: Testes (a imagem so e enviada se todos passarem)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fozesc_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fozesc_ci
+      JWT_SECRET_KEY: somente-para-os-testes
+
+    steps:
+      - name: Checkout do código-fonte
+        uses: actions/checkout@v4
+        with:
+          path: Back-end
+
+      # test_bordero_juros e test_prorrogacao conferem com a conta da tela
+      # (Front-end/src/utils/calculoBordero.js)
+      - name: Checkout do Front-end
+        uses: actions/checkout@v4
+        with:
+          repository: Fozesc/Front-end
+          path: Front-end
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configurar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar dependências
+        working-directory: Back-end
+        run: pip install -r requirements.txt
+
+      - name: Rodar os testes
+        working-directory: Back-end
+        run: |
+          set -e
+          for t in test_*.py; do
+            echo "::group::$t"
+            python "$t"
+            echo "::endgroup::"
+          done
+
   build-and-push:
     name: Construir e Enviar para o Docker Hub
+    needs: testes
     runs-on: ubuntu-latest
 
     steps:

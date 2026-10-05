@@ -33,6 +33,9 @@ MAX_PARTES = 10
 # teto da lista de titulos do mesmo borderô na tela de detalhes
 LIMITE_PARCELAS = 100
 
+# rotulo que o recebimento dividido grava no fim da descricao: "(Parte 1/2 · PIX)"
+RX_PARTE = re.compile(r'\(Parte (\d+)/\d+(?: · ([^)]+))?\)\s*$')
+
 class CheckService:
     def __init__(self):
         self.audit = AuditService()
@@ -220,38 +223,23 @@ class CheckService:
             query = query.filter(or_(*filtros_busca))
 
         if status:
-            status_list = status.split(',')
-            status_list = [s for s in status_list if s]
+            status_list = [s for s in status.split(',') if s]
             if status_list and 'Todos' not in status_list:
-            
-                if 'Atrasado' in status_list:
-                    hoje = date.today()
-                   
-                    condicao_atrasado = or_(
-                        Check.status == 'Atrasado',
-                        and_(Check.status == 'Aguardando', Check.due_date < hoje)
-                    )
-                    
-                    outros_status = [s for s in status_list if s != 'Atrasado']
-                    if outros_status:
-                        query = query.filter(or_(Check.status.in_(outros_status), condicao_atrasado))
+                hoje = date.today()
+                vencido = and_(Check.status == 'Aguardando', Check.due_date < hoje)
+                condicoes = []
+                for s in status_list:
+                    if s == 'Atrasado':
+                        condicoes.append(or_(Check.status == 'Atrasado', vencido))
+                    elif s == 'Aguardando':
+                        condicoes.append(and_(Check.status == 'Aguardando', Check.due_date >= hoje))
                     else:
-                        query = query.filter(condicao_atrasado)
-                else:
-                    query = query.filter(Check.status.in_(status_list))
+                        condicoes.append(Check.status == s)
+                query = query.filter(or_(*condicoes))
 
         if date_start:
-            hoje = date.today()
-            # vencido que ainda nao foi recebido nao some por causa do "De":
-            # Juridico e Prorrogado vencido tambem (antes sumiam, e a soma nao batia)
-            query = query.filter(
-                or_(
-                    Check.due_date >= date_start,
-                    and_(Check.status.in_(['Aguardando', 'Prorrogado']), Check.due_date < hoje),
-                    Check.status.in_(['Atrasado', 'Devolvido', 'Juridico'])
-                )
-            )
-            
+            query = query.filter(Check.due_date >= date_start)
+
         if date_end:
             query = query.filter(Check.due_date <= date_end)
 
@@ -386,7 +374,7 @@ class CheckService:
         ).scalar()
         return {'total_portfolio': total or 0.0}
 
-    def _validar_partes(self, partes, total):
+    def _validar_partes(self, partes, total, rotulo='valor do título'):
         """Recebimento dividido (parte no dinheiro, parte no banco...).
 
         Valida tudo ANTES de encostar no caixa e devolve [(conta, forma, valor)].
@@ -424,8 +412,32 @@ class CheckService:
         total = round(float(total or 0), 2)
         if abs(soma - total) > 0.01:
             raise ValueError(f"A soma das partes (R$ {soma:.2f}) tem que fechar com o "
-                             f"valor do título (R$ {total:.2f})")
+                             f"{rotulo} (R$ {total:.2f})")
         return limpas
+
+    def _rotulo_imposto(self, calc, imposto):
+        """Como o imposto foi calculado, para o caixa e a auditoria. A conta vem da tela
+        (calcularImposto em calculoBordero.js): aqui so confere o formato do retrato."""
+        if not calc:
+            return 'valor à mão'
+        if not isinstance(calc, dict):
+            raise ValueError("Cálculo do imposto inválido")
+        try:
+            dias = int(calc.get('dias') or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Cálculo do imposto inválido")
+        taxa = self._valor(calc.get('taxa_mensal') or 0, 'Taxa do imposto')
+        sistema = calc.get('calculado')
+        sistema = None if sistema in (None, '') else self._valor(sistema, 'Imposto calculado')
+        # dias <= 0: titulo em dia na data escolhida (o valor foi digitado)
+        if taxa > 100 or abs(dias) > 36500:
+            raise ValueError("Cálculo do imposto inválido")
+        if dias <= 0 or not sistema:
+            return 'valor à mão'
+        texto = f"{dias} dias a {f'{taxa:g}'.replace('.', ',')}% a.m." + (" + IOF" if calc.get('iof') else "")
+        if abs(sistema - imposto) > 0.005:
+            texto += f", à mão (sistema R$ {sistema:.2f})"
+        return texto
 
     def _apagar_lancamentos(self, check, categoria, prefixo):
         """Desfaz no caixa o que a baixa/devolucao criou.
@@ -462,18 +474,31 @@ class CheckService:
 
         # Valida ANTES de mexer no cheque: pedido invalido nao chega a alterar nada.
         partes = None
+        imposto, rotulo_imposto = 0.0, ''
         if new_status == 'Pago' and old_status != 'Pago':
+            # imposto so quando ele marca na tela: atrasado ou nao, quem decide e' ele
+            imposto = self._valor(dados.get('imposto') or 0, 'Imposto')
+            if imposto:
+                rotulo_imposto = self._rotulo_imposto(dados.get('imposto_calculo'), imposto)
             if dados.get('partes'):
-                partes = self._validar_partes(dados['partes'], check.amount)
+                partes = self._validar_partes(dados['partes'], round(float(check.amount or 0) + imposto, 2),
+                                              'total com imposto' if imposto else 'valor do título')
             else:
                 if (dados.get('method') or 'Dinheiro') not in CONTAS_CAIXA:
                     raise ValueError(f"Conta inválida (use {', '.join(CONTAS_CAIXA)})")
                 forma_unica = str(dados.get('forma') or '').strip()
                 if forma_unica and forma_unica not in FORMAS_PAGAMENTO:
                     raise ValueError("Forma de pagamento inválida")
+        taxa_multa = 0.0
         if new_status == 'Devolvido' and old_status != 'Devolvido':
             if (dados.get('method') or 'Dinheiro') not in CONTAS_CAIXA:
                 raise ValueError(f"Conta inválida (use {', '.join(CONTAS_CAIXA)})")
+            try:
+                taxa_multa = float(dados.get('taxa_multa', 2.0) or 0.0)
+            except (TypeError, ValueError):
+                raise ValueError("Taxa de multa inválida")
+            if not 0 <= taxa_multa <= 100:
+                raise ValueError("Taxa de multa inválida (use de 0 a 100%)")
 
         check.status = new_status
         detalhe_partes = ''
@@ -482,9 +507,13 @@ class CheckService:
             check.payment_date = None
             check.paid_amount = 0.0
             check.payment_method = None
+            check.imposto_cobrado = 0.0
             self._apagar_lancamentos(check, 'Recebimento de Cheque', 'Recebimento Cheque')
+            self._apagar_lancamentos(check, 'Multas e Juros', 'Imposto Cheque')
 
-        if old_status == 'Devolvido' and new_status != 'Devolvido':
+        # so DESFAZER a devolucao (voltar a cobrar) tira a multa do caixa. Receber o cheque
+        # devolvido ou manda-lo ao Juridico mantem: a multa ja entrou de verdade.
+        if old_status == 'Devolvido' and new_status in ('Aguardando', 'Atrasado'):
             check.fine_amount = 0.0
             self._apagar_lancamentos(check, 'Multas e Juros', 'Multa Devolução Cheque')
 
@@ -492,23 +521,36 @@ class CheckService:
         if new_status == 'Pago' and old_status != 'Pago':
             hoje = datetime.now().date()
             desc_base = f"Recebimento Cheque #{check.number or 'S/N'} - {check.issuer_name or ''}"
+            # o imposto vai numa linha propria ('Multas e Juros'), como os juros da prorrogacao
+            desc_imposto = (f"Imposto Cheque #{check.number or 'S/N'} - {check.issuer_name or ''}"[:110]
+                            + f" ({rotulo_imposto})")
+
+            def entrada(descricao, valor, conta, categoria):
+                db.session.add(Transaction(
+                    date=hoje,
+                    description=descricao[:200],
+                    amount=valor,
+                    type='entrada',
+                    origin=conta,
+                    category=categoria,
+                    operation_id=check.operation_id,
+                    check_id=check.id
+                ))
 
             if partes:
                 total_pago = round(sum(v for _, _, v in partes), 2)
                 qtd = len(partes)
+                falta_imposto = imposto
                 for i, (conta, forma, valor) in enumerate(partes, 1):
                     # "Dinheiro · Dinheiro" e' redundante: forma so aparece se somar info
                     rotulo = f" (Parte {i}/{qtd}" + (f" · {forma}" if forma and forma != conta else "") + ")"
-                    db.session.add(Transaction(
-                        date=hoje,
-                        description=(desc_base + rotulo)[:200],
-                        amount=valor,
-                        type='entrada',
-                        origin=conta,
-                        category='Recebimento de Cheque',
-                        operation_id=check.operation_id,
-                        check_id=check.id
-                    ))
+                    # cada parte paga primeiro o que falta do imposto e o resto e' do titulo
+                    de_imposto = round(min(valor, falta_imposto), 2)
+                    falta_imposto = round(falta_imposto - de_imposto, 2)
+                    if de_imposto > 0:
+                        entrada(desc_imposto + rotulo, de_imposto, conta, 'Multas e Juros')
+                    if round(valor - de_imposto, 2) > 0:
+                        entrada(desc_base + rotulo, round(valor - de_imposto, 2), conta, 'Recebimento de Cheque')
                 contas = list(dict.fromkeys(c for c, _, _ in partes))
                 check.payment_method = f"Múltiplo ({' + '.join(contas)})"[:50]
                 detalhe_partes = ' | Partes: ' + ' + '.join(
@@ -517,32 +559,24 @@ class CheckService:
                 method = dados.get('method') or 'Dinheiro'
                 forma = str(dados.get('forma') or '').strip()
                 try:
-                    total_pago = round(float(dados.get('amount') or check.amount or 0), 2)
+                    # com imposto o titulo entra pelo valor devido; 'amount' e' do formato antigo
+                    principal = round(float((None if imposto else dados.get('amount')) or check.amount or 0), 2)
                 except (TypeError, ValueError):
                     raise ValueError("Valor recebido inválido")
                 # a forma e' so rotulo ("recebi via PIX"): quem manda no saldo e a conta
                 rotulo = f" · {forma}" if forma and forma != method else ""
                 check.payment_method = f"{method}{rotulo}"[:50]
-                db.session.add(Transaction(
-                    date=hoje,
-                    description=(desc_base + rotulo)[:200],
-                    amount=total_pago,
-                    type='entrada',
-                    origin=method,
-                    category='Recebimento de Cheque',
-                    operation_id=check.operation_id,
-                    check_id=check.id
-                ))
+                entrada(desc_base + rotulo, principal, method, 'Recebimento de Cheque')
+                if imposto:
+                    entrada(desc_imposto + rotulo, imposto, method, 'Multas e Juros')
+                total_pago = round(principal + imposto, 2)
 
             check.payment_date = hoje
             check.paid_amount = total_pago
+            check.imposto_cobrado = imposto
 
         # --- LÓGICA DE NOVO CHEQUE DEVOLVIDO ---
         elif new_status == 'Devolvido' and old_status != 'Devolvido':
-            try:
-                taxa_multa = float(dados.get('taxa_multa', 2.0) or 0.0)
-            except (TypeError, ValueError):
-                raise ValueError("Taxa de multa inválida")
             method = dados.get('method') or 'Dinheiro'
 
             multa_calculada = round(float(check.amount or 0.0) * (taxa_multa / 100.0), 2)
@@ -565,7 +599,12 @@ class CheckService:
 
         acao = 'BAIXA' if new_status == 'Pago' else 'UPDATE'
         detalhes = f"Cheque #{check.number} ({check.issuer_name}): {old_status} -> {new_status}"
-        if new_status == 'Pago': detalhes += f" | Recebido: R$ {check.paid_amount}{detalhe_partes}"
+        if new_status == 'Pago':
+            detalhes += f" | Recebido: R$ {check.paid_amount}"
+            if imposto:
+                detalhes += (f" (título R$ {check.paid_amount - imposto:.2f} + imposto "
+                             f"R$ {imposto:.2f}: {rotulo_imposto})")
+            detalhes += detalhe_partes
         if new_status == 'Devolvido': detalhes += f" | Multa: R$ {check.fine_amount}"
 
         self.audit.log_action(self._get_current_user(), acao, 'Cheque', detalhes)
@@ -714,7 +753,9 @@ class CheckService:
                 if not check.original_due_date:
                     check.original_due_date = venc_atual
                 check.due_date = nova
-                check.status = 'Prorrogado'
+                # prorrogado nao e' mais status: volta a Aguardando (vira Atrasado sozinho se
+                # passar da nova data) e a tela marca "prorrogado" pelo historico
+                check.status = 'Aguardando'
 
             detalhe = {
                 'prorrogar': prorrogar,
@@ -810,18 +851,20 @@ class CheckService:
         # continua sem consulta extra por linha.
         partes_pagamento = []
         if (getattr(c, 'payment_method', '') or '').startswith('Múltiplo'):
+            # com imposto, uma parte pode ter 2 linhas (imposto + titulo): soma pela parte
+            por_parte = {}
             for t in Transaction.query.filter(
                     Transaction.check_id == c.id,
-                    Transaction.category == 'Recebimento de Cheque'
+                    Transaction.category.in_(('Recebimento de Cheque', 'Multas e Juros')),
+                    or_(Transaction.description.like('Recebimento Cheque%'),
+                        Transaction.description.like('Imposto Cheque%'))
                     ).order_by(Transaction.id).all():
-                desc = t.description or ''
                 # a forma ("PIX", "Dinheiro"...) fica no rotulo "(Parte 1/2 · PIX)"
-                forma = desc.rsplit('·', 1)[-1].rstrip(')').strip() if '·' in desc else ''
-                partes_pagamento.append({
-                    'conta': t.origin,
-                    'forma': forma,
-                    'valor': float(t.amount or 0.0)
-                })
+                m = RX_PARTE.search(t.description or '')
+                p = por_parte.setdefault(int(m.group(1)) if m else -t.id,
+                                         {'conta': t.origin, 'forma': (m.group(2) if m else '') or '', 'valor': 0.0})
+                p['valor'] = round(p['valor'] + float(t.amount or 0.0), 2)
+            partes_pagamento = [por_parte[k] for k in sorted(por_parte)]
 
         return {
             'id': c.id,
@@ -854,6 +897,11 @@ class CheckService:
             
             'data_pagamento': c.payment_date.strftime('%Y-%m-%d') if getattr(c, 'payment_date', None) else None,
             'valor_pago': float(c.paid_amount or 0.0),
+            'imposto_cobrado': float(c.imposto_cobrado or 0.0),
+            'multa': float(c.fine_amount or 0.0),
+            # quantas vezes o vencimento foi empurrado (marca "prorrogado" na tela)
+            'prorrogacoes': sum(1 for e in getattr(c, 'extensions', [])
+                                if e.old_due_date and e.new_due_date and e.new_due_date > e.old_due_date),
             'forma_pagamento': getattr(c, 'payment_method', None),
             'partes_pagamento': partes_pagamento,
             'forma_devolucao': forma_devolucao,

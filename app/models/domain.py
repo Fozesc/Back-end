@@ -144,6 +144,9 @@ class Check(db.Model):
                                 server_default=db.text('false'))
     paid_amount = db.Column(db.Float, default=0.0) # Quanto pagou de verdade
     fine_amount = db.Column(db.Float, default=0.0) # Multas cobradas (se devolvido)
+    # Imposto (juros + IOF) cobrado a mais no Receber; ja esta somado no paid_amount
+    imposto_cobrado = db.Column(db.Float, nullable=False, default=0.0,
+                                server_default=db.text('0'))
 
 
     operation = db.relationship('Operation', backref=db.backref('checks', lazy=True, cascade="all, delete-orphan"))
@@ -197,3 +200,18 @@ class TokenBlocklist(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     jti = db.Column(db.String(36), nullable=False, index=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+
+# --- VALE (adiantamento) ---
+# Sair o vale tira o dinheiro da conta (saida no caixa); dar baixa devolve (entrada).
+class Vale(db.Model):
+    __tablename__ = 'vales'
+    id = db.Column(db.Integer, primary_key=True)
+    pessoa = db.Column(db.String(100), nullable=False)
+    descricao = db.Column(db.String(200))
+    valor = db.Column(db.Float, nullable=False)
+    data = db.Column(db.Date, nullable=False)
+    conta = db.Column(db.String(20), nullable=False)
+    status = db.Column(db.String(10), nullable=False, default='Aberto')
+    data_pagamento = db.Column(db.Date)
+    conta_pagamento = db.Column(db.String(20))
+    created_at = db.Column(db.DateTime, default=datetime.now)

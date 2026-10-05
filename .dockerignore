@@ -22,6 +22,7 @@ README.md
 # Para rodar no servidor, mande o import_planilha.py junto com as planilhas pelo
 # docker cp (o passo esta no COMO_IMPORTAR.md, que tambem fica so na sua maquina).
 import_planilha.py
+import_*.py
 COMO_IMPORTAR.md
 test_import_*.py
 inport/

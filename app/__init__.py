@@ -80,8 +80,22 @@ def create_app():
             'ALTER TABLE checks ADD COLUMN IF NOT EXISTS juros_pendentes '
             'DOUBLE PRECISION NOT NULL DEFAULT 0',
             'ALTER TABLE check_extensions ADD COLUMN IF NOT EXISTS detalhe JSON',
+            # imposto (juros + IOF) cobrado a mais no Receber
+            'ALTER TABLE checks ADD COLUMN IF NOT EXISTS imposto_cobrado '
+            'DOUBLE PRECISION NOT NULL DEFAULT 0',
         ):
             db.session.execute(text(comando))
+        # Prorrogado deixou de ser status (pedido de 02/10/2026): o titulo prorrogado fica
+        # Aguardando e vira Atrasado sozinho se passar da nova data. A marca "prorrogado"
+        # da tela vem do historico em check_extensions, que nao muda.
+        ids = [i for (i,) in db.session.execute(text(
+            "UPDATE checks SET status = 'Aguardando' WHERE status = 'Prorrogado' RETURNING id"))]
+        if ids:
+            db.session.add(domain.AuditLog(
+                user_name='Sistema', action='UPDATE', target='Cheque',
+                description=f"Status Prorrogado virou Aguardando em {len(ids)} cheque(s) "
+                            f"(ids: {', '.join(map(str, sorted(ids)))}). A prorrogação continua "
+                            f"no histórico de cada cheque."))
         db.session.commit()
 
 

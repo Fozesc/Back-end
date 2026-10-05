@@ -11,7 +11,7 @@ service = CheckService()
 @jwt_required()
 def index():
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 20, type=int)
+    per_page = min(max(request.args.get('per_page', 20, type=int), 1), 100)
     search = request.args.get('search', '')
     status = request.args.get('status', '')
     date_start = request.args.get('date_start')
@@ -61,7 +61,7 @@ def portfolio_total():
 
 # Chaves de `payment_data` que o servico entende. Whitelist para nada mais do JSON
 # entrar por engano na baixa (ex.: mandar 'status' ou campo do cheque por dentro).
-CAMPOS_PAGAMENTO = ('method', 'forma', 'amount', 'taxa_multa', 'partes')
+CAMPOS_PAGAMENTO = ('method', 'forma', 'amount', 'taxa_multa', 'partes', 'imposto', 'imposto_calculo')
 
 
 @bp.route('/<int:id>/status', methods=['PATCH'])
