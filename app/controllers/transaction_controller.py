@@ -28,12 +28,23 @@ def create():
     data = request.json
     return jsonify(service.create(data)), 201
 
+@bp.route('/troca', methods=['POST'])
+@jwt_required()
+def create_troca():
+    try:
+        return jsonify(service.create_troca(request.get_json(silent=True) or {})), 201
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
 # --- ROTA QUE ESTAVA FALTANDO PARA EDITAR LANÇAMENTO ---
 @bp.route('/<int:id>', methods=['PUT'])
 @jwt_required()
 def update_transaction(id):
     data = request.get_json()
-    result = service.update(id, data)
+    try:
+        result = service.update(id, data)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     if result:
         return jsonify(result), 200
     return jsonify({"error": "Lançamento não encontrado"}), 404

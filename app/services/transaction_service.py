@@ -192,6 +192,48 @@ class TransactionService:
                              f"Lançamento: {new_t.description} | R$ {new_t.amount} ({new_t.origin})")
         return self._serialize(new_t)
 
+    CONTAS_TROCA = ('Dinheiro', 'Banco do Brasil', 'Caixa Econômica')
+
+    def create_troca(self, data):
+        """Troca entre contas (ex: cliente entrega R$ 500 em dinheiro e recebe R$ 500 no PIX).
+        Grava a entrada numa conta e a saida na outra com o mesmo valor; as duas linhas
+        compartilham o troca_id (= id da saida) para o caixa saber que sao uma coisa so."""
+        try:
+            valor = round(abs(float(data.get('valor'))), 2)
+        except (TypeError, ValueError):
+            raise ValueError('Valor inválido')
+        if valor <= 0:
+            raise ValueError('Valor deve ser maior que zero')
+        entra, sai = data.get('conta_entrada'), data.get('conta_saida')
+        if entra not in self.CONTAS_TROCA or sai not in self.CONTAS_TROCA:
+            raise ValueError('Conta inválida')
+        if entra == sai:
+            raise ValueError('A troca precisa de duas contas diferentes')
+        desc = str(data.get('descricao') or '').strip()[:200] or 'Troca'
+        try:
+            dt = datetime.strptime(str(data.get('data') or date.today())[:10], '%Y-%m-%d').date()
+        except ValueError:
+            raise ValueError('Data inválida')
+
+        saida = Transaction(date=dt, description=desc, amount=-valor, type='saida',
+                            origin=sai, category='Troca')
+        db.session.add(saida)
+        db.session.flush()
+        saida.troca_id = saida.id
+        entrada = Transaction(date=dt, description=desc, amount=valor, type='entrada',
+                              origin=entra, category='Troca', troca_id=saida.id)
+        db.session.add(entrada)
+        db.session.commit()
+        self.audit.log_action(self._get_current_user(), 'CREATE', 'FluxoCaixa',
+                              f"Troca #{saida.id}: {desc} | R$ {valor} | {sai} -> {entra}")
+        return [self._serialize(saida), self._serialize(entrada)]
+
+    def _par_da_troca(self, t):
+        if not t.troca_id:
+            return None
+        return Transaction.query.filter(Transaction.troca_id == t.troca_id,
+                                        Transaction.id != t.id).first()
+
     def update(self, id, data):
         t = Transaction.query.get(id)
         if not t: return None
@@ -211,11 +253,21 @@ class TransactionService:
         val = data.get('amount') or data.get('valor')
         if val is not None: t.amount = float(val)
         
-        if 'type' in data: t.type = data['type']
-        elif 'tipo' in data: t.type = data['tipo']
+        if not t.troca_id:
+            if 'type' in data: t.type = data['type']
+            elif 'tipo' in data: t.type = data['tipo']
         
         if 'origin' in data: t.origin = data['origin']
         elif 'origem' in data: t.origin = data['origem']
+
+        par = self._par_da_troca(t)
+        if par:
+            if par.origin == t.origin:
+                db.session.rollback()
+                raise ValueError('A troca precisa de duas contas diferentes')
+            par.date, par.description = t.date, t.description
+            t.amount = abs(t.amount) if t.type == 'entrada' else -abs(t.amount)
+            par.amount = abs(t.amount) if par.type == 'entrada' else -abs(t.amount)
         
         db.session.commit()
         
@@ -252,6 +304,12 @@ class TransactionService:
         if vinculo:
             retrato += f" | VINCULADO A: {vinculo}"
 
+        par = self._par_da_troca(t)
+        if par:
+            retrato += (f" | TROCA: também apagou #{par.id} ({par.type} R$ {par.amount} "
+                        f"conta: {par.origin})")
+            db.session.delete(par)
+
         db.session.delete(t)
         db.session.commit()
 
@@ -271,5 +329,6 @@ class TransactionService:
             # dividido (mesmo cheque, contas diferentes) numa linha so visualmente
             'check_id': t.check_id,
             # a tela avisa antes de apagar uma linha que veio de um cheque/bordero
-            'operation_id': t.operation_id
+            'operation_id': t.operation_id,
+            'troca_id': t.troca_id
         }

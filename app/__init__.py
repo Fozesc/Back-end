@@ -83,6 +83,8 @@ def create_app():
             # imposto (juros + IOF) cobrado a mais no Receber
             'ALTER TABLE checks ADD COLUMN IF NOT EXISTS imposto_cobrado '
             'DOUBLE PRECISION NOT NULL DEFAULT 0',
+            'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS troca_id INTEGER',
+            'CREATE INDEX IF NOT EXISTS ix_transactions_troca_id ON transactions (troca_id)',
         ):
             db.session.execute(text(comando))
         # Prorrogado deixou de ser status (pedido de 02/10/2026): o titulo prorrogado fica

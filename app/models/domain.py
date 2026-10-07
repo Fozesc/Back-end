@@ -168,6 +168,7 @@ class Transaction(db.Model):
     # depender de casar texto de descricao). Fica NULL no que nao e' de um cheque so
     # (borderô, lancamento manual) e nas linhas antigas.
     check_id = db.Column(db.Integer, db.ForeignKey('checks.id', ondelete='SET NULL'), nullable=True)
+    troca_id = db.Column(db.Integer, nullable=True, index=True)
 
 
 class CheckExtension(db.Model):
