@@ -1,4 +1,5 @@
 from app import db
+from sqlalchemy import event
 from datetime import datetime
 
 # --- CONFIGURAÇÕES DO SISTEMA ---
@@ -92,6 +93,10 @@ class Operation(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
     #(Aberto, Finalizada, Cancelada)
     status = db.Column(db.String(20), default='Finalizada')
+    # Comissao de alguem da empresa: `comissao` pontos dos `monthly_rate` pontos da taxa
+    # (2 de 8% = 25% dos juros). Sai dos juros: nao muda juros, IOF nem o liquido do cliente.
+    comissao = db.Column(db.Float, nullable=False, default=0.0, server_default=db.text('0'))
+    comissao_valor = db.Column(db.Float, nullable=False, default=0.0, server_default=db.text('0'))
     # cliente para operacao
     client = db.relationship('Client', backref=db.backref('operations', lazy=True))
 
@@ -169,8 +174,32 @@ class Transaction(db.Model):
     # (borderô, lancamento manual) e nas linhas antigas.
     check_id = db.Column(db.Integer, db.ForeignKey('checks.id', ondelete='SET NULL'), nullable=True)
     troca_id = db.Column(db.Integer, nullable=True, index=True)
+    # Linhas lancadas juntas (borderô/prorrogacao com comissao): todas guardam o id da
+    # primeira. E' so para o caixa mostrar o bloco junto, com a mesma cor.
+    grupo_id = db.Column(db.Integer, nullable=True)
+    # Linha so informativa (ex.: juros que ainda vao entrar): amount fica 0, entao nao mexe
+    # em saldo nem em soma nenhuma; o valor que a tela mostra fica aqui.
+    valor_informativo = db.Column(db.Float, nullable=True)
     # Pagamento (total ou parcial) de um vale. A soma destas entradas e' o quanto ja foi pago.
     vale_id = db.Column(db.Integer, db.ForeignKey('vales.id', ondelete='SET NULL'), nullable=True, index=True)
+
+
+def conta_padrao(origem):
+    """Nome unico da conta no caixa: 'Dinheiro', 'BB' ou 'Caixa' ('Banco do Brasil',
+    'Caixa Econômica', 'cef'... viram estes). E' a mesma regra do saldo (get_balances), entao
+    padronizar nunca muda o saldo de conta nenhuma. 'Sistema (BB)' continua marcando o que o
+    sistema lancou sozinho (borderô)."""
+    texto = (origem or '').strip().upper()
+    conta = ('BB' if ('BRASIL' in texto or 'BB' in texto)
+             else 'Caixa' if ('CAIXA' in texto or 'CEF' in texto) else 'Dinheiro')
+    return f"Sistema ({conta})" if texto.startswith('SISTEMA') else conta
+
+
+# toda linha do caixa grava a conta com o nome padrao, venha de onde vier
+@event.listens_for(Transaction, 'before_insert')
+@event.listens_for(Transaction, 'before_update')
+def _padroniza_conta(mapper, connection, linha):
+    linha.origin = conta_padrao(linha.origin)
 
 
 class CheckExtension(db.Model):

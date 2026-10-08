@@ -91,8 +91,28 @@ def create_app():
             'CREATE INDEX IF NOT EXISTS ix_transactions_vale_id ON transactions (vale_id)',
             # vale passou a ter so a descricao (o "para quem" ficou so nos antigos)
             'ALTER TABLE vales ALTER COLUMN pessoa DROP NOT NULL',
+            # comissao do borderô (parte dos juros que vai para alguem da empresa)
+            'ALTER TABLE operations ADD COLUMN IF NOT EXISTS comissao DOUBLE PRECISION NOT NULL DEFAULT 0',
+            'ALTER TABLE operations ADD COLUMN IF NOT EXISTS comissao_valor DOUBLE PRECISION NOT NULL DEFAULT 0',
+            # comissao sai do caixa no dia, junto com a saida do borderô / prorrogacao
+            'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS grupo_id INTEGER',
+            'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS valor_informativo DOUBLE PRECISION',
         ):
             db.session.execute(text(comando))
+        # Contas do caixa com um nome so (Dinheiro / BB / Caixa; 'Sistema (X)' no que o sistema
+        # lanca sozinho). So troca o NOME: a regra e' a mesma do saldo, saldo nenhum muda.
+        trocas = []
+        for (origem,) in db.session.execute(text('SELECT DISTINCT origin FROM transactions')).all():
+            nova = domain.conta_padrao(origem)
+            if nova != origem:
+                n = db.session.execute(text('UPDATE transactions SET origin = :nova '
+                                            'WHERE origin IS NOT DISTINCT FROM :velha'),
+                                       {'nova': nova, 'velha': origem}).rowcount
+                trocas.append(f"'{origem}' -> '{nova}' ({n})")
+        if trocas:
+            db.session.add(domain.AuditLog(
+                user_name='Sistema', action='UPDATE', target='FluxoCaixa',
+                description='Contas do caixa padronizadas (o saldo não muda): ' + '; '.join(trocas)))
         # Prorrogado deixou de ser status (pedido de 02/10/2026): o titulo prorrogado fica
         # Aguardando e vira Atrasado sozinho se passar da nova data. A marca "prorrogado"
         # da tela vem do historico em check_extensions, que nao muda.

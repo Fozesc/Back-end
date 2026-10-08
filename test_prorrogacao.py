@@ -283,11 +283,55 @@ def main():
             linha = next(x for x in operado['linhas'] if x['label'] == 'Valor de face operado no período')
             assert linha['valor'] == 2600.0, linha
 
+        # ------- 10. comissao: sai do caixa hoje, ligada aos juros pagos + linha de juros informativa
+        with app.app_context():
+            e_ = Check(operation_id=Operation.query.first().id, number='105', due_date=date(2026, 10, 1),
+                       amount=1000.0, interest_amount=0.0, net_amount=1000.0, status='Aguardando', issuer_name='Emitente E')
+            db.session.add(e_)
+            db.session.commit()
+            id_e = e_.id
+        pc = tela(valorAnterior=1000, dataBase='2026-10-01', novaData='2026-10-31')
+        base = pc['calculado']['juros']                      # juros sem o IOF
+        codigo = (f"import('{UTIL}').then(m => console.log(JSON.stringify(m.calcularComissao("
+                  f"{{ juros: {base}, comissao: 2, taxaMensal: 4 }}))))")
+        com = json.loads(subprocess.run(['node', '-e', codigo], capture_output=True, text=True, check=True).stdout)
+        assert com['parte'] == 50 and com['valor'] > 0, com
+        corpo = {**como_a_tela(pc, '2026-10-01', '2026-10-31', conta='BB'),
+                 'comissao': 2, 'comissao_base': base, 'comissao_conta': 'Dinheiro'}
+
+        antes_e = estado(id_e)
+        for ruim in ({'comissao': 5}, {'comissao_base': round(pc['juros'] + 1, 2)}, {'comissao_conta': 'PIX'},
+                     {'comissao': 'abc'}, {'prorrogar': False, 'valor_recebido': 10}):
+            r = prorrogar(id_e, {**corpo, **ruim})
+            assert r.status_code == 400, (ruim, r.data)
+            assert estado(id_e) == antes_e, f"gravou algo com comissao invalida: {ruim}"
+
+        s_antes = saldos()
+        r = prorrogar(id_e, corpo)
+        assert r.status_code == 200, r.data
+        with app.app_context():
+            ls = Transaction.query.filter_by(check_id=id_e).order_by(Transaction.id).all()
+            assert [(t.category, t.type, t.amount, t.origin, t.valor_informativo) for t in ls] == [
+                ('Multas e Juros', 'entrada', pc['juros'], 'BB', None),
+                ('Comissão', 'saida', -com['valor'], 'Dinheiro', None),
+                ('Informativo', 'entrada', 0.0, 'Dinheiro', round(pc['juros'] - com['valor'], 2))], \
+                [(t.category, t.amount, t.origin, t.valor_informativo) for t in ls]
+            assert {t.grupo_id for t in ls} == {ls[0].id}, 'linhas da prorrogacao ligadas'
+            assert ls[0].amount == round(-ls[1].amount + ls[2].valor_informativo, 2), 'juros = comissao + o que fica'
+            assert 'Comissão (50% dos juros) - prorrogação do cheque #105' in ls[1].description
+            assert 'comissão 2 de 4 pontos' in AuditLog.query.order_by(AuditLog.id.desc()).first().description
+        s_depois = saldos()
+        assert round(s_depois['bb_total'] - s_antes['bb_total'], 2) == pc['juros'], 'juros entraram no BB'
+        assert round(s_antes['dinheiro_total'] - s_depois['dinheiro_total'], 2) == com['valor'], 'comissao saiu do Dinheiro'
+        h = r.get_json()['historico_prorrogacao'][-1]
+        assert (h['comissao'], h['comissao_base'], h['comissao_valor'], h['comissao_conta']) == (2, base, com['valor'], 'Dinheiro'), h
+        assert r.get_json()['valor_bruto'] == 1000, 'comissao nao mexe no valor devido'
+
         print(f"OK: prorrogar pagando os juros ({p1['juros']:.2f}) deixa o valor igual; juros 100 + pago 300 -> "
               f"800; proxima prorrogacao sobre 800 ({p3['totalComJuros']:.2f}); pago menor que os juros soma a "
               f"diferenca; pagamento sem prorrogar; Receber/desfazer preserva os parciais; detalhes com o borderô; "
               f"18 entradas invalidas barradas sem gravar; ajuste so com senha; caixa, auditoria, carteira e "
-              f"'total operado' certos.")
+              f"'total operado' certos; comissao sai do caixa ligada aos juros (invalida barrada).")
     finally:
         if _app is not None:
             with _app.app_context():

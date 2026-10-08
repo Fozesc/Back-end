@@ -97,7 +97,7 @@ def main():
             with app.app_context():
                 op = db.session.get(Operation, op_id)
                 chs = Check.query.filter_by(operation_id=op_id).order_by(Check.id).all()
-                tx = Transaction.query.filter_by(operation_id=op_id).one()
+                tx = Transaction.query.filter_by(operation_id=op_id, category='Compra de Ativos').one()
                 return op, [(c.interest_amount, c.net_amount, c.days) for c in chs], tx.amount
 
         # ------------------------------ 1. com e sem IOF: centavo por centavo da tela
@@ -129,6 +129,72 @@ def main():
         assert r.status_code == 201, r.data
         _, chs, _ = gravado(r.get_json()['id'])
         assert chs == [(l['juros'], l['liquido'], l['dias']) for l in linhas]
+
+        # ---- 5. comissao: parte dos juros pela conta da tela; nao mexe em juros/liquido/caixa
+        linhas = tela(1375.82, '2026-09-29', VENCS, 4, 2, False)
+        codigo = (f"import('{UTIL}').then(m => console.log(JSON.stringify(m.calcularComissao("
+                  f"{{ juros: {sum(l['juros'] for l in linhas)}, comissao: 1, taxaMensal: 4 }}))))")
+        da_tela = json.loads(subprocess.run(['node', '-e', codigo], capture_output=True, text=True, check=True).stdout)
+        r = http.post('/api/operations', headers=cab, json={**payload(linhas, False), 'comissao': 1})
+        assert r.status_code == 201, r.data
+        assert r.get_json()['comissao_valor'] == da_tela['valor'] == 878.79, (r.get_json()['comissao_valor'], da_tela)
+        op, chs, caixa = gravado(r.get_json()['id'])
+        assert op.comissao == 1 and chs == [(l['juros'], l['liquido'], l['dias']) for l in linhas]
+        assert op.total_interest == 3515.17 and op.total_net_value == 10243.03 == -caixa, 'comissao mexeu no borderô'
+        # no caixa: saida do borderô + comissao (sai hoje) + juros sem a comissao (so informativo), ligadas
+        with app.app_context():
+            ls = Transaction.query.filter_by(operation_id=op.id).order_by(Transaction.id).all()
+            # 1a linha (so informativa) = total que sai do banco; as de baixo: cliente + comissao
+            assert [(t.category, t.type, t.amount, t.valor_informativo) for t in ls] == [
+                ('Informativo', 'saida', 0.0, 11121.82),
+                ('Compra de Ativos', 'saida', -10243.03, None),
+                ('Comissão', 'saida', -878.79, None)], [(t.category, t.amount, t.valor_informativo) for t in ls]
+            assert ls[0].valor_informativo == round(-ls[1].amount - ls[2].amount, 2), 'total = cliente + comissao'
+            assert {t.grupo_id for t in ls} == {ls[0].id}, 'as 3 linhas ligadas pelo id da primeira'
+            assert ls[0].description.startswith('Pgto Borderô #') and ls[1].description.startswith('Cliente recebe - Borderô #')
+            assert len({t.origin for t in ls}) == 1 and ls[2].description.startswith('Comissão (25% dos juros) - Borderô #')
+        saldo_dinheiro = http.get('/api/transactions/balances', headers=cab).get_json()['bruto']['dinheiro_total']
+        lista = http.get('/api/transactions?per_page=3', headers=cab).get_json()
+        assert {l['grupo_id'] for l in lista['items']} == {ls[0].id}
+        assert [l['valor_informativo'] for l in lista['items'] if l['valor_informativo'] is not None] == [11121.82]
+        assert round(lista['summary']['saidas'], 2) == 11121.82, 'o total informativo nao soma de novo no caixa'
+        assert http.put(f"/api/transactions/{ls[0].id}", headers=cab, json={'valor': 10}).status_code == 400, \
+            'linha informativa nao se edita'
+        with app.app_context():
+            from app.models.domain import AuditLog
+            primeiro = Check.query.filter_by(operation_id=op.id).order_by(Check.id).first().id
+            assert 'Comissão: 1 de 4 pontos da taxa (25.0% dos juros) = R$ 878.79' in \
+                AuditLog.query.filter_by(target='Borderô').order_by(AuditLog.id.desc()).first().description
+        b = http.get(f'/api/checks/{primeiro}', headers=cab).get_json()['bordero']
+        assert (b['comissao'], b['comissao_valor']) == (1, 878.79), b
+
+        with app.app_context():
+            antes = (Operation.query.count(), Check.query.count(), Transaction.query.count())
+        for ruim in (4.01, -1, 'abc', 'NaN'):
+            r = http.post('/api/operations', headers=cab, json={**payload(linhas, False), 'comissao': ruim})
+            assert r.status_code == 400 and 'omissão' in r.get_json()['error'], (ruim, r.data)
+        with app.app_context():
+            assert (Operation.query.count(), Check.query.count(), Transaction.query.count()) == antes
+        # cheque negativo ou com juros maior que o proprio valor: recusa sem gravar nada
+        sem_centavos = payload(linhas, False, com_centavos=False)
+        negativo = {**sem_centavos, 'checks': [{**sem_centavos['checks'][0], 'valor': -10}]}
+        longe = {**sem_centavos, 'checks': [{**sem_centavos['checks'][0], 'vencimento': '2030-01-01'}]}
+        for corpo, trecho in ((negativo, 'maior que zero'), (longe, 'passam do valor'),
+                              ({**sem_centavos, 'checks': []}, 'sem cheques')):
+            r = http.post('/api/operations', headers=cab, json=corpo)
+            assert r.status_code == 400 and trecho in r.get_json()['error'], (trecho, r.data)
+        with app.app_context():
+            assert (Operation.query.count(), Check.query.count(), Transaction.query.count()) == antes
+
+        r = http.post('/api/operations', headers=cab, json={**payload(linhas, False), 'comissao': 4})
+        assert r.get_json()['comissao_valor'] == 3515.17, 'comissao igual a taxa = os juros inteiros'
+        r = http.post('/api/operations', headers=cab, json=payload(linhas, False))
+        assert r.status_code == 201 and r.get_json()['comissao_valor'] == 0 and r.get_json()['comissao'] == 0
+        with app.app_context():
+            sem = Transaction.query.filter_by(operation_id=r.get_json()['id']).all()
+            assert len(sem) == 1 and sem[0].grupo_id is None, 'sem comissao continua uma linha so'
+        saldo_depois = http.get('/api/transactions/balances', headers=cab).get_json()['bruto']['dinheiro_total']
+        assert round(saldo_dinheiro - saldo_depois, 2) == round(10243.03 + 3515.17 + 10243.03, 2), 'comissao 4 de 4 + borderô sem comissao'
 
         # ------------ 4. alinhar_juros: borderô gravado com a formula antiga, caixa certo
         linhas = tela(1375.82, '2026-09-29', VENCS, 4, 2, False)
@@ -163,7 +229,9 @@ def main():
 
         print("OK: cheque grava exatamente o juros/IOF/liquido da tela (com e sem IOF), caixa e totais "
               "sao a soma dos mesmos numeros, adulterado recusado sem gravar, tela antiga da o mesmo "
-              "resultado, e alinhar_juros corrige so o borderô que confere com o caixa.")
+              "resultado, comissao igual a da tela sem mexer no liquido (invalida recusada), cheque negativo ou "
+              "com juros maior que o valor recusado, "
+              "e alinhar_juros corrige so o borderô que confere com o caixa.")
     finally:
         if _app is not None:
             with _app.app_context():

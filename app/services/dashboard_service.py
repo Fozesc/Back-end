@@ -127,7 +127,7 @@ class DashboardService:
       
         cash_query = db.session.query(
             func.to_char(Transaction.date, 'YYYY-MM-DD'),
-            func.sum(case((Transaction.type == 'entrada', Transaction.amount), else_=-Transaction.amount))
+            func.sum(case((Transaction.type == 'entrada', func.abs(Transaction.amount)), else_=-func.abs(Transaction.amount)))
         ).filter(Transaction.date >= start_date)\
          .group_by(func.to_char(Transaction.date, 'YYYY-MM-DD'))\
          .all()

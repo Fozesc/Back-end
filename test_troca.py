@@ -83,7 +83,7 @@ def main():
             return http.post('/api/transactions/troca', headers=cab, json={**base, **kw})
 
         assert http.post('/api/transactions/troca', json={}).status_code == 401
-        for ruim in ({'valor': 0}, {'valor': 'abc'}, {'conta_saida': 'Dinheiro'},
+        for ruim in ({'valor': 0}, {'valor': 'abc'}, {'conta_saida': 'Dinheiro'}, {'conta_entrada': 'BB'},
                      {'conta_entrada': 'Nubank'}, {'data': 'ontem'}):
             assert troca(**ruim).status_code == 400, ruim
         with app.app_context():
@@ -92,7 +92,7 @@ def main():
         r = troca()
         assert r.status_code == 201, r.data
         saida, entrada = r.get_json()
-        assert saida['tipo'] == 'saida' and saida['origem'] == 'Banco do Brasil'
+        assert saida['tipo'] == 'saida' and saida['origem'] == 'BB', 'grava o nome padrao da conta'
         assert entrada['tipo'] == 'entrada' and entrada['origem'] == 'Dinheiro'
         assert saida['troca_id'] == entrada['troca_id'] == saida['id']
         assert abs(saida['valor']) == entrada['valor'] == 500
@@ -123,9 +123,37 @@ def main():
             assert 'TROCA' in d, d
         assert saldo()['dinheiro_total'] == 0
 
+        # ------------- nome da conta padronizado: no que entra agora e no que ja estava gravado
+        with app.app_context():
+            for origem in ('Caixa Econômica', 'sistema (banco do brasil)', None):
+                db.session.add(Transaction(date=date(2026, 10, 7), description='x', amount=1, type='entrada', origin=origem))
+            db.session.commit()
+            assert sorted(t.origin for t in Transaction.query.filter_by(description='x')) == ['Caixa', 'Dinheiro', 'Sistema (BB)']
+            from sqlalchemy import text
+            for velha in ('Banco do Brasil', 'CEF', 'Sistema (Caixa Econômica)', 'dinheiro'):
+                db.session.execute(text("INSERT INTO transactions (date, description, amount, type, origin) "
+                                        "VALUES ('2026-10-07', 'antiga', 10, 'entrada', :o)"), {'o': velha})
+            db.session.commit()
+        antes = saldo()
+
+        def reiniciar():                              # o boot padroniza o que ja estava gravado
+            outro = create_app()
+            with outro.app_context():
+                db.engine.dispose()
+        reiniciar()
+        with app.app_context():
+            assert sorted(t.origin for t in Transaction.query.filter_by(description='antiga')) == \
+                ['BB', 'Caixa', 'Dinheiro', 'Sistema (Caixa)']
+            assert 'Contas do caixa padronizadas' in AuditLog.query.order_by(AuditLog.id.desc()).first().description
+        assert saldo() == antes, 'padronizar o nome nao muda saldo nenhum'
+        reiniciar()
+        with app.app_context():
+            assert AuditLog.query.filter(AuditLog.description.like('Contas do caixa padronizadas%')).count() == 1, \
+                'rodar de novo nao mexe em nada'
+
         print("OK: troca grava entrada + saida ligadas com o mesmo valor, total do caixa "
               "nao muda, valida entrada no backend, editar sincroniza a outra ponta e "
-              "apagar remove as duas.")
+              "apagar remove as duas; conta com nome padrao (Dinheiro/BB/Caixa) no novo e no antigo, sem mexer em saldo.")
     finally:
         apaga_banco()
 

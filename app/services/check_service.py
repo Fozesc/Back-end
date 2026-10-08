@@ -8,6 +8,7 @@ import math
 import re
 from datetime import datetime, date
 from werkzeug.security import check_password_hash
+from app.services.operation_service import arredondar, agrupar, linha_comissao, linha_informativa
 
 # Marca que o import_planilha.py grava em Operation.notes. E' assim que o sistema
 # sabe que um cheque veio da planilha antiga, sem precisar de coluna nova.
@@ -698,6 +699,23 @@ class CheckService:
             }
         total_com_juros = round(saldo_base + juros, 2)
 
+        # comissao: `comissao` pontos dos `taxa` pontos da taxa, sobre os juros sem o IOF
+        # (`comissao_base`, que vem da tela - o backend nao refaz a conta dos juros)
+        comissao = self._valor(dados.get('comissao') or 0, 'Comissão')
+        comissao_valor, comissao_base, comissao_conta = 0.0, 0.0, None
+        if comissao:
+            if not prorrogar:
+                raise ValueError("Comissão só existe na prorrogação (pagamento parcial não tem juros)")
+            if comissao > calculo['taxa_mensal']:
+                raise ValueError(f"A comissão tem que ficar entre 0 e a taxa ({calculo['taxa_mensal']:g}%)")
+            comissao_base = self._valor(dados.get('comissao_base') or 0, 'Juros da comissão')
+            if comissao_base > juros:
+                raise ValueError("Os juros da comissão não podem passar dos juros da prorrogação")
+            comissao_conta = str(dados.get('comissao_conta') or '').strip()
+            if comissao_conta not in CONTAS_CAIXA:
+                raise ValueError(f"Conta da comissão inválida (use {', '.join(CONTAS_CAIXA)})")
+            comissao_valor = arredondar(comissao_base * comissao / calculo['taxa_mensal'])
+
         recebido = self._valor(dados.get('valor_recebido') or 0, 'Valor pago')
         if recebido > total_com_juros:
             raise ValueError(f"Pago (R$ {recebido:.2f}) maior que o devido (R$ {total_com_juros:.2f})")
@@ -746,6 +764,7 @@ class CheckService:
             # cada parte paga primeiro o que falta dos juros e o resto abate o saldo:
             # o caixa fica certo por conta E por categoria
             falta_juros = juros_pagos
+            linhas_caixa = []
             for i, (conta_parte, forma, valor_parte) in enumerate(partes, 1):
                 de_juros = round(min(valor_parte, falta_juros), 2)
                 falta_juros = round(falta_juros - de_juros, 2)
@@ -756,10 +775,21 @@ class CheckService:
                                                  (round(valor_parte - de_juros, 2), 'Recebimento Parcial',
                                                   'Recebimento parcial')):
                     if valor > 0:
-                        db.session.add(Transaction(
+                        linhas_caixa.append(Transaction(
                             date=data_recebimento, amount=valor, type='entrada', origin=conta_parte,
                             description=f"{rotulo} - Cheque #{numero} - {emitente}{sufixo}"[:200],
                             category=categoria, operation_id=check.operation_id, check_id=check.id))
+            if comissao_valor > 0:
+                # juros da prorrogacao = comissao (sai hoje) + o que fica para a empresa (so informativo)
+                rotulo = f"prorrogação do cheque #{numero} - {emitente}"
+                vinculo = {'operation_id': check.operation_id, 'check_id': check.id}
+                agrupar(linhas_caixa + [
+                    linha_comissao(hoje, comissao_conta, comissao_valor, rotulo,
+                                   f"{comissao / calculo['taxa_mensal'] * 100:.4g}%".replace('.', ','), **vinculo),
+                    linha_informativa(hoje, comissao_conta, round(juros - comissao_valor, 2), 'entrada',
+                                      f"Juros sem a comissão (informativo) - {rotulo}", **vinculo)])
+            else:
+                db.session.add_all(linhas_caixa)
 
             if check.original_amount is None and novo_total != total:
                 check.original_amount = total
@@ -789,6 +819,8 @@ class CheckService:
                 'juros_nao_pagos': juros_nao_pagos,
                 'novo_total': novo_total,
                 **calculo,
+                **({'comissao': comissao, 'comissao_base': comissao_base, 'comissao_valor': comissao_valor,
+                    'comissao_conta': comissao_conta} if comissao_valor else {}),
             }
             db.session.add(CheckExtension(
                 check_id=check.id, old_due_date=venc_atual, new_due_date=nova,
@@ -811,6 +843,9 @@ class CheckService:
         if recebido:
             texto += (f" | pagou R$ {recebido:.2f} em {conta} (juros R$ {juros_pagos:.2f} + "
                       f"abatido R$ {abatido:.2f})")
+        if comissao_valor:
+            texto += (f" | comissão {comissao:g} de {calculo['taxa_mensal']:g} pontos sobre juros R$ {comissao_base:.2f} "
+                      f"= R$ {comissao_valor:.2f} (saiu de {comissao_conta})")
         if juros_nao_pagos:
             texto += f" | R$ {juros_nao_pagos:.2f} de juros ficaram no saldo"
         texto += f" | novo valor devido R$ {novo_total:.2f}"
@@ -950,6 +985,8 @@ class CheckService:
                 'dias_compensacao': op.compensation_days or 0,
                 'conta_saida': None if importado else op.account_source,
                 'iof': float(op.iof_amount or 0),
+                'comissao': float(op.comissao or 0),
+                'comissao_valor': float(op.comissao_valor or 0),
                 'valor_total': float(op.total_face_value or 0),
                 'juros_total': float(op.total_interest or 0),
                 'liquido_entregue': float(op.total_net_value or 0),

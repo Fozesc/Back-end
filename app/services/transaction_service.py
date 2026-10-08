@@ -1,4 +1,4 @@
-from app.models.domain import Transaction, CompanySettings, User, Check, Operation, Vale
+from app.models.domain import Transaction, CompanySettings, User, Check, Operation, Vale, conta_padrao
 from app import db
 from app.services.audit_service import AuditService
 from sqlalchemy import func, case, or_
@@ -194,7 +194,8 @@ class TransactionService:
                              f"Lançamento: {new_t.description} | R$ {new_t.amount} ({new_t.origin})")
         return self._serialize(new_t)
 
-    CONTAS_TROCA = ('Dinheiro', 'Banco do Brasil', 'Caixa Econômica')
+    # aceita o nome curto e o por extenso; grava o padrao (Dinheiro / BB / Caixa)
+    CONTAS_TROCA = ('Dinheiro', 'BB', 'Caixa', 'Banco do Brasil', 'Caixa Econômica')
 
     def create_troca(self, data):
         """Troca entre contas (ex: cliente entrega R$ 500 em dinheiro e recebe R$ 500 no PIX).
@@ -209,6 +210,7 @@ class TransactionService:
         entra, sai = data.get('conta_entrada'), data.get('conta_saida')
         if entra not in self.CONTAS_TROCA or sai not in self.CONTAS_TROCA:
             raise ValueError('Conta inválida')
+        entra, sai = conta_padrao(entra), conta_padrao(sai)
         if entra == sai:
             raise ValueError('A troca precisa de duas contas diferentes')
         desc = str(data.get('descricao') or '').strip()[:200] or 'Troca'
@@ -239,6 +241,8 @@ class TransactionService:
     def update(self, id, data):
         t = Transaction.query.get(id)
         if not t: return None
+        if t.valor_informativo is not None:
+            raise ValueError('Linha só informativa (não mexe no saldo): não dá para editar')
         
         # --- ADICIONE ESTAS DUAS LINHAS AQUI ---
         antiga_desc = t.description
@@ -259,8 +263,8 @@ class TransactionService:
             if 'type' in data: t.type = data['type']
             elif 'tipo' in data: t.type = data['tipo']
         
-        if 'origin' in data: t.origin = data['origin']
-        elif 'origem' in data: t.origin = data['origem']
+        if 'origin' in data: t.origin = conta_padrao(data['origin'])
+        elif 'origem' in data: t.origin = conta_padrao(data['origem'])
 
         par = self._par_da_troca(t)
         if par:
@@ -338,5 +342,7 @@ class TransactionService:
             # a tela avisa antes de apagar uma linha que veio de um cheque/bordero
             'operation_id': t.operation_id,
             'troca_id': t.troca_id,
-            'vale_id': t.vale_id
+            'vale_id': t.vale_id,
+            'grupo_id': t.grupo_id,
+            'valor_informativo': t.valor_informativo
         }
