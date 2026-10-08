@@ -169,6 +169,8 @@ class Transaction(db.Model):
     # (borderô, lancamento manual) e nas linhas antigas.
     check_id = db.Column(db.Integer, db.ForeignKey('checks.id', ondelete='SET NULL'), nullable=True)
     troca_id = db.Column(db.Integer, nullable=True, index=True)
+    # Pagamento (total ou parcial) de um vale. A soma destas entradas e' o quanto ja foi pago.
+    vale_id = db.Column(db.Integer, db.ForeignKey('vales.id', ondelete='SET NULL'), nullable=True, index=True)
 
 
 class CheckExtension(db.Model):
@@ -202,12 +204,26 @@ class TokenBlocklist(db.Model):
     jti = db.Column(db.String(36), nullable=False, index=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
 
+# --- NOTAS DO CLIENTE ---
+# Historico de anotacoes da ficha do cliente. `autor` e' o nome de quem escreveu na hora
+# (fica mesmo se o usuario mudar de nome depois).
+class ClientNote(db.Model):
+    __tablename__ = 'client_notes'
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, db.ForeignKey('clients.id', ondelete='CASCADE'), nullable=False)
+    autor = db.Column(db.String(100), nullable=False)
+    texto = db.Column(db.Text, nullable=False)
+    criado_em = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    editado_em = db.Column(db.DateTime)
+    __table_args__ = (db.Index('ix_client_notes_client_criado', 'client_id', 'criado_em'),)
+
 # --- VALE (adiantamento) ---
 # Sair o vale tira o dinheiro da conta (saida no caixa); dar baixa devolve (entrada).
 class Vale(db.Model):
     __tablename__ = 'vales'
     id = db.Column(db.Integer, primary_key=True)
-    pessoa = db.Column(db.String(100), nullable=False)
+    # so vale antigo tem: o novo e' so a descricao
+    pessoa = db.Column(db.String(100))
     descricao = db.Column(db.String(200))
     valor = db.Column(db.Float, nullable=False)
     data = db.Column(db.Date, nullable=False)

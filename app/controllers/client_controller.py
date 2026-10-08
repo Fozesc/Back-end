@@ -1,4 +1,5 @@
 from flask import Blueprint, jsonify, request
+from app import db
 from app.services.client_service import ClientService
 from flask_jwt_extended import jwt_required
 bp = Blueprint('clients', __name__, url_prefix='/api/clients')
@@ -58,3 +59,46 @@ def merge():
         return jsonify({'error': str(e)}), 400
     except Exception:
         return jsonify({'error': 'Não foi possível juntar os cadastros'}), 500
+
+
+@bp.route('/<int:id>/notas', methods=['GET'])
+@jwt_required()
+def listar_notas(id):
+    data = service.listar_notas(id, request.args.get('page', 1, type=int), request.args.get('per_page', 20, type=int))
+    if data is None:
+        return jsonify({'error': 'Cliente não encontrado'}), 404
+    return jsonify(data)
+
+
+@bp.route('/<int:id>/notas', methods=['POST'])
+@jwt_required()
+def criar_nota(id):
+    try:
+        nota = service.criar_nota(id, request.get_json(silent=True))
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
+    if nota is None:
+        return jsonify({'error': 'Cliente não encontrado'}), 404
+    return jsonify(nota), 201
+
+
+@bp.route('/<int:id>/notas/<int:nota_id>', methods=['PUT'])
+@jwt_required()
+def editar_nota(id, nota_id):
+    try:
+        nota = service.editar_nota(id, nota_id, request.get_json(silent=True))
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
+    if nota is None:
+        return jsonify({'error': 'Nota não encontrada'}), 404
+    return jsonify(nota)
+
+
+@bp.route('/<int:id>/notas/<int:nota_id>', methods=['DELETE'])
+@jwt_required()
+def apagar_nota(id, nota_id):
+    if not service.apagar_nota(id, nota_id):
+        return jsonify({'error': 'Nota não encontrada'}), 404
+    return '', 204

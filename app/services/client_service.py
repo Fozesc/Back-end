@@ -1,8 +1,12 @@
-from app.models.domain import Client, Operation, Check, User
+from app.models.domain import Client, ClientNote, Operation, Check, User
 from app import db
 from app.services.audit_service import AuditService
 from sqlalchemy import or_, and_, func, case
 from werkzeug.security import check_password_hash
+from datetime import datetime
+
+MAX_TEXTO_NOTA = 4000
+MAX_NOTAS_POR_PAGINA = 50
 
 class ClientService:
     def __init__(self):
@@ -146,6 +150,8 @@ class ClientService:
             Operation.query.filter_by(client_id=origem.id).update(
                 {'client_id': destino.id, 'client_name_snapshot': destino.name},
                 synchronize_session=False)
+            qtd_notas = ClientNote.query.filter_by(client_id=origem.id).update(
+                {'client_id': destino.id}, synchronize_session=False)
             db.session.delete(origem)
             db.session.commit()
         except Exception:
@@ -155,11 +161,75 @@ class ClientService:
         self.audit.log_action(
             self._get_current_user(), 'MERGE', 'Cliente',
             f"Juntou o cliente '{nome_origem}' (#{origem_id}) em '{nome_destino}' (#{destino_id}): "
-            f"{qtd_borderos} borderô(s) e {qtd_cheques} cheque(s) foram transferidos. "
+            f"{qtd_borderos} borderô(s), {qtd_cheques} cheque(s) e {qtd_notas} nota(s) foram transferidos. "
             f"Cadastro apagado: [{retrato}] [confirmado com senha]")
 
         return {'borderos': qtd_borderos, 'cheques': qtd_cheques,
                 'apagado': nome_origem, 'mantido': nome_destino, 'destino_id': destino_id}
+
+    @staticmethod
+    def _texto_nota(dados):
+        texto = (dados or {}).get('texto')
+        texto = texto.strip() if isinstance(texto, str) else ''
+        if not texto:
+            raise ValueError('A nota não pode ficar vazia')
+        if len(texto) > MAX_TEXTO_NOTA:
+            raise ValueError(f'A nota pode ter no máximo {MAX_TEXTO_NOTA} caracteres')
+        return texto
+
+    @staticmethod
+    def _serialize_nota(n):
+        return {'id': n.id, 'autor': n.autor, 'texto': n.texto,
+                'criado_em': n.criado_em.isoformat(timespec='minutes'),
+                'editado_em': n.editado_em.isoformat(timespec='minutes') if n.editado_em else None}
+
+    def _nota(self, client_id, nota_id):
+        return ClientNote.query.filter_by(id=nota_id, client_id=client_id).first()
+
+    def listar_notas(self, client_id, page, per_page):
+        if not db.session.get(Client, client_id):
+            return None
+        per_page = max(1, min(per_page, MAX_NOTAS_POR_PAGINA))
+        pag = ClientNote.query.filter_by(client_id=client_id).order_by(
+            ClientNote.criado_em.desc(), ClientNote.id.desc()
+        ).paginate(page=page, per_page=per_page, error_out=False)
+        return {'items': [self._serialize_nota(n) for n in pag.items],
+                'total': pag.total, 'pages': pag.pages, 'current_page': page}
+
+    def criar_nota(self, client_id, dados):
+        cliente = db.session.get(Client, client_id)
+        if not cliente:
+            return None
+        nota = ClientNote(client_id=client_id, autor=self._get_current_user()[:100], texto=self._texto_nota(dados))
+        db.session.add(nota)
+        db.session.commit()
+        self.audit.log_action(nota.autor, 'CREATE', 'Nota', f"Nota #{nota.id} no cliente '{cliente.name}' (#{client_id})")
+        return self._serialize_nota(nota)
+
+    def editar_nota(self, client_id, nota_id, dados):
+        nota = self._nota(client_id, nota_id)
+        if not nota:
+            return None
+        texto = self._texto_nota(dados)
+        if texto != nota.texto:
+            antigo = nota.texto
+            nota.texto, nota.editado_em = texto, datetime.now()
+            db.session.commit()
+            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Nota',
+                                  f"Editou a nota #{nota.id} do cliente #{client_id} (autor: {nota.autor}). "
+                                  f"Antes: '{antigo[:500]}'")
+        return self._serialize_nota(nota)
+
+    def apagar_nota(self, client_id, nota_id):
+        nota = self._nota(client_id, nota_id)
+        if not nota:
+            return False
+        retrato = (f"Apagou a nota #{nota.id} do cliente #{client_id} (autor: {nota.autor}, "
+                   f"criada em {nota.criado_em:%d/%m/%Y %H:%M}): '{nota.texto[:1000]}'")
+        db.session.delete(nota)
+        db.session.commit()
+        self.audit.log_action(self._get_current_user(), 'DELETE', 'Nota', retrato)
+        return True
 
     def get_paginated(self, page, per_page, search=None, status_filter=None):
         query = Client.query

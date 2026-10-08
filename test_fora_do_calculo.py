@@ -186,6 +186,20 @@ def main():
             assert c.amount == 2000.0 and c.interest_amount == 200.0 and c.net_amount == 1800.0, \
                 f"valor/juros NAO podem mudar na edicao: {c.amount}/{c.interest_amount}/{c.net_amount}"
             assert str(c.operation.operation_date) == '2026-09-15', c.operation.operation_date
+            c.operation.notes = '[IMPORT-PLANILHA:abc] Importado da planilha historica | antiga'
+            db.session.commit()
+
+        r = cliente_http.put(f'/api/checks/{id_aberto}', headers=cab,
+                             json={'observacao': '  cliente pediu para segurar  ', 'senha': SENHA})
+        assert r.status_code == 200 and r.get_json()['observacao'] == 'cliente pediu para segurar', r.data
+        with app.app_context():
+            c = db.session.get(Check, id_aberto)
+            assert c.operation.notes == '[IMPORT-PLANILHA:abc] | cliente pediu para segurar', c.operation.notes
+        r = cliente_http.put(f'/api/checks/{id_aberto}', headers=cab, json={'observacao': '', 'senha': SENHA})
+        assert r.status_code == 200 and r.get_json()['observacao'] == '', r.data
+        with app.app_context():
+            c = db.session.get(Check, id_aberto)
+            assert c.operation.notes == '[IMPORT-PLANILHA:abc]', 'apagar a observacao mantem a marca do import'
 
             # a edicao e a acao em lote ficam registradas na auditoria
             from app.models.domain import AuditLog

@@ -12,10 +12,17 @@ from werkzeug.security import check_password_hash
 # Marca que o import_planilha.py grava em Operation.notes. E' assim que o sistema
 # sabe que um cheque veio da planilha antiga, sem precisar de coluna nova.
 TAG_IMPORT = 'IMPORT-PLANILHA'
+RX_MARCA_IMPORT = re.compile(r'\[' + TAG_IMPORT + r':[^\]]*\]')
+
+
+def notas_limpas(op):
+    # a marca do import e o texto fixo dele nao sao observacao de ninguem
+    return re.sub(r'\[' + TAG_IMPORT + r':[^\]]*\]\s*(Importado da planilha historica)?\s*\|?\s*',
+                  '', (op.notes if op else '') or '').strip()
 
 # Campos que a edicao de cheque aceita mexer. Valor bruto, juros e liquido NAO estao
 # aqui de proposito: a regra do projeto e nunca recalcular/reescrever juros.
-CAMPOS_EDITAVEIS = ('emitente', 'vencimento', 'data_pagamento', 'data_operacao')
+CAMPOS_EDITAVEIS = ('emitente', 'vencimento', 'data_pagamento', 'data_operacao', 'observacao')
 
 # Contas que existem no caixa. A origem da transacao TEM que ser uma destas: e' esse
 # texto que o get_balances usa para decidir em qual saldo o dinheiro entrou
@@ -181,6 +188,15 @@ class CheckService:
                     mudancas.append(f"data da operacao (borderô #{check.operation_id}) "
                                     f"{check.operation.operation_date} -> {nova}")
                     check.operation.operation_date = nova
+
+            if 'observacao' in data and check.operation:
+                op = check.operation
+                nova = str(data['observacao'] or '').strip()[:1000]
+                atual = notas_limpas(op)
+                if nova != atual:
+                    marca = RX_MARCA_IMPORT.search(op.notes or '')
+                    op.notes = ' | '.join(x for x in (marca.group(0) if marca else '', nova) if x) or None
+                    mudancas.append(f"observacao do borderô #{op.id} '{atual}' -> '{nova}'")
 
             if not mudancas:
                 return True, self._serialize_check(check)
@@ -403,7 +419,7 @@ class CheckService:
                 valor = round(float(p.get('valor', p.get('amount', 0))), 2)
             except (TypeError, ValueError):
                 raise ValueError(f"Parte {i}: valor inválido")
-            if valor <= 0:
+            if not valor > 0:
                 raise ValueError(f"Parte {i}: o valor tem que ser maior que zero")
 
             limpas.append((conta, forma, valor))
@@ -828,9 +844,7 @@ class CheckService:
 
     def _serialize_check(self, c):
 
-        obs_da_operacao = ""
-        if hasattr(c, 'operation') and c.operation:
-            obs_da_operacao = getattr(c.operation, 'notes', '')
+        obs_da_operacao = notas_limpas(getattr(c, 'operation', None))
 
         # 2. Descobre forma de devolução (se houver)
         forma_devolucao = None
@@ -920,9 +934,7 @@ class CheckService:
             return None
         op = c.operation
         importado = TAG_IMPORT in (op.notes or '')
-        # a marca do import e o texto fixo dele nao sao observacao de ninguem
-        notas = re.sub(r'\[' + TAG_IMPORT + r':[^\]]*\]\s*(Importado da planilha historica)?\s*\|?\s*',
-                       '', op.notes or '')
+        notas = notas_limpas(op)
         irmaos = (db.session.query(Check.id, Check.number, Check.due_date, Check.amount, Check.status,
                                    Check.issuer_name)
                   .filter(Check.operation_id == op.id)

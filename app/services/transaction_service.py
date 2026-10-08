@@ -1,4 +1,4 @@
-from app.models.domain import Transaction, CompanySettings, User, Check, Operation
+from app.models.domain import Transaction, CompanySettings, User, Check, Operation, Vale
 from app import db
 from app.services.audit_service import AuditService
 from sqlalchemy import func, case, or_
@@ -39,6 +39,8 @@ class TransactionService:
             if c:
                 return f"recebimento do cheque #{c.number or 'S/N'} ({c.issuer_name or 'sem emitente'})"
             return f"recebimento de cheque (#{t.check_id}, ja apagado)"
+        if t.vale_id:
+            return f"{'pagamento' if t.type == 'entrada' else 'saída'} do vale #{t.vale_id}"
         if t.operation_id:
             op = db.session.get(Operation, t.operation_id)
             if op:
@@ -310,6 +312,11 @@ class TransactionService:
                         f"conta: {par.origin})")
             db.session.delete(par)
 
+        vale = db.session.get(Vale, t.vale_id) if t.vale_id and t.type == 'entrada' else None
+        if vale and vale.status == 'Pago':
+            vale.status, vale.data_pagamento, vale.conta_pagamento = 'Aberto', None, None
+            retrato += f" | vale #{vale.id} voltou para Aberto"
+
         db.session.delete(t)
         db.session.commit()
 
@@ -330,5 +337,6 @@ class TransactionService:
             'check_id': t.check_id,
             # a tela avisa antes de apagar uma linha que veio de um cheque/bordero
             'operation_id': t.operation_id,
-            'troca_id': t.troca_id
+            'troca_id': t.troca_id,
+            'vale_id': t.vale_id
         }

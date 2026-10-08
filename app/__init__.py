@@ -85,6 +85,12 @@ def create_app():
             'DOUBLE PRECISION NOT NULL DEFAULT 0',
             'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS troca_id INTEGER',
             'CREATE INDEX IF NOT EXISTS ix_transactions_troca_id ON transactions (troca_id)',
+            # pagamento parcial de vale: cada pagamento e' uma linha do caixa ligada ao vale
+            'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS vale_id INTEGER '
+            'REFERENCES vales(id) ON DELETE SET NULL',
+            'CREATE INDEX IF NOT EXISTS ix_transactions_vale_id ON transactions (vale_id)',
+            # vale passou a ter so a descricao (o "para quem" ficou so nos antigos)
+            'ALTER TABLE vales ALTER COLUMN pessoa DROP NOT NULL',
         ):
             db.session.execute(text(comando))
         # Prorrogado deixou de ser status (pedido de 02/10/2026): o titulo prorrogado fica
