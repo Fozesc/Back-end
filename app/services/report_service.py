@@ -2,7 +2,7 @@ import pandas as pd
 from app import db
 from app.models.domain import Check, Operation, Client, Transaction, CompanySettings
 from app.services.history_service import bank_key, NOME_CONTA
-from sqlalchemy import func, case
+from sqlalchemy import func, case, or_, and_, not_
 from datetime import datetime, timedelta
 import os
 
@@ -27,6 +27,26 @@ VERDE, VERMELHO, AZUL, ROXO, LARANJA, CIANO = (
     '#10b981', '#ef4444', '#6366f1', '#a855f7', '#f97316', '#0ea5e9')
 COR_STATUS = {'Atrasado': VERMELHO, 'Devolvido': LARANJA, 'Juridico': ROXO}
 COR_CONTA = {'BRASIL': '#3b82f6', 'CAIXA': CIANO, 'DINHEIRO': VERDE}
+
+
+# Relatorio do caixa: conta escolhida na tela -> filtro SQL com a MESMA regra do bank_key
+# (BB primeiro, depois Caixa, o resto e' Dinheiro), para os numeros baterem com o Fluxo de Caixa.
+_ORIGEM = func.upper(func.coalesce(Transaction.origin, ''))
+_E_BB = or_(_ORIGEM.like('%BRASIL%'), _ORIGEM.like('%BB%'))
+_E_CAIXA = or_(_ORIGEM.like('%CAIXA%'), _ORIGEM.like('%CEF%'))
+FILTRO_CONTA = {
+    'bb': _E_BB,
+    'caixa': and_(not_(_E_BB), _E_CAIXA),
+    'dinheiro': and_(not_(_E_BB), not_(_E_CAIXA)),
+}
+CONTA_DO_FILTRO = {'bb': 'BRASIL', 'caixa': 'CAIXA', 'dinheiro': 'DINHEIRO'}
+NOME_CURTO = {'BRASIL': 'BB', 'CAIXA': 'Caixa', 'DINHEIRO': 'Dinheiro'}
+MAX_EXTRATO_POR_PAGINA = 1000
+# so o que mexe no saldo: linha informativa (total do borderô, juros que ficam) fica de fora
+_REAL = Transaction.valor_informativo.is_(None)
+_COM_SINAL = case((Transaction.type == 'entrada', func.abs(Transaction.amount)), else_=-func.abs(Transaction.amount))
+_ENTRADA = case((Transaction.type == 'entrada', func.abs(Transaction.amount)), else_=0.0)
+_SAIDA = case((Transaction.type != 'entrada', func.abs(Transaction.amount)), else_=0.0)
 
 
 class ReportService:
@@ -427,6 +447,101 @@ class ReportService:
                 'total_linhas': int(qtd),
                 'truncado': int(qtd) > LIMITE_ITENS,
             }],
+        }
+
+    def relatorio_caixa(self, inicio, fim, conta='todas', tipo='todos', page=1, per_page=100):
+        """Relatorio do caixa (tela + PDF): saldo anterior, entradas, saidas e saldo final
+        da conta escolhida (ou de todas), por conta, por categoria e o extrato com o saldo
+        depois de cada lancamento. Tudo somado no banco; o extrato vem paginado."""
+        d1, d2 = self._periodo(inicio, fim)
+        conta = (conta or 'todas').lower()
+        if conta not in ('todas', *FILTRO_CONTA):
+            raise ValueError('Conta inválida (use todas, dinheiro, bb ou caixa)')
+        if tipo not in ('todos', 'entrada', 'saida'):
+            raise ValueError('Tipo inválido (use todos, entrada ou saida)')
+        page = max(1, int(page or 1))
+        per_page = max(1, min(int(per_page or 100), MAX_EXTRATO_POR_PAGINA))
+        da_conta = [FILTRO_CONTA[conta]] if conta in FILTRO_CONTA else []
+        no_periodo = [Transaction.date >= d1, Transaction.date <= d2, _REAL]
+
+        # por conta: poucas origens distintas, a classificacao fica com o bank_key
+        contas = {k: {'saldo_anterior': 0.0, 'entradas': 0.0, 'saidas': 0.0, 'qtd': 0}
+                  for k in ('DINHEIRO', 'BRASIL', 'CAIXA')}
+        for origem, val in db.session.query(Transaction.origin, func.sum(_COM_SINAL))\
+                .filter(Transaction.date < d1, _REAL).group_by(Transaction.origin):
+            contas[bank_key(origem)]['saldo_anterior'] += float(val or 0)
+        for origem, ent, sai, qtd in db.session.query(
+                Transaction.origin, func.sum(_ENTRADA), func.sum(_SAIDA), func.count(Transaction.id))\
+                .filter(*no_periodo).group_by(Transaction.origin):
+            c = contas[bank_key(origem)]
+            c['entradas'] += float(ent or 0)
+            c['saidas'] += float(sai or 0)
+            c['qtd'] += qtd
+
+        def fechar(c):
+            return {'saldo_anterior': round(c['saldo_anterior'], 2), 'entradas': round(c['entradas'], 2),
+                    'saidas': round(c['saidas'], 2), 'qtd': c['qtd'],
+                    'saldo_final': round(c['saldo_anterior'] + c['entradas'] - c['saidas'], 2)}
+
+        por_conta = [{'conta': NOME_CURTO[k], **fechar(c)} for k, c in contas.items()]
+        escolhidas = [contas[CONTA_DO_FILTRO[conta]]] if conta in CONTA_DO_FILTRO else list(contas.values())
+        resumo = fechar({campo: sum(c[campo] for c in escolhidas)
+                         for campo in ('saldo_anterior', 'entradas', 'saidas', 'qtd')})
+
+        categorias = {'entrada': [], 'saida': []}
+        for categoria, tp, total, qtd in db.session.query(
+                func.coalesce(Transaction.category, 'Sem categoria'),
+                case((Transaction.type == 'entrada', 'entrada'), else_='saida'),
+                func.sum(func.abs(Transaction.amount)), func.count(Transaction.id))\
+                .filter(*no_periodo, *da_conta)\
+                .group_by(func.coalesce(Transaction.category, 'Sem categoria'),
+                          case((Transaction.type == 'entrada', 'entrada'), else_='saida')):
+            categorias[tp].append({'categoria': categoria, 'total': round(float(total or 0), 2), 'qtd': qtd})
+        for lista in categorias.values():
+            lista.sort(key=lambda x: -x['total'])
+
+        # extrato: o saldo de cada linha conta TODOS os lancamentos da conta ate ali
+        # (mesmo filtrando so entradas, o saldo continua o verdadeiro)
+        saldo_antes = resumo['saldo_anterior']
+        linhas = db.session.query(
+            Transaction.id, Transaction.date, Transaction.description, Transaction.category,
+            Transaction.origin, Transaction.type, Transaction.amount,
+            func.sum(_COM_SINAL).over(order_by=(Transaction.date, Transaction.id)).label('acumulado'),
+        ).filter(*no_periodo, *da_conta).subquery()
+        q = db.session.query(linhas)
+        if tipo == 'entrada':
+            q = q.filter(linhas.c.type == 'entrada')
+        elif tipo == 'saida':
+            q = q.filter(linhas.c.type != 'entrada')
+        total = q.count()
+        itens = q.order_by(linhas.c.date, linhas.c.id).offset((page - 1) * per_page).limit(per_page).all()
+
+        s = CompanySettings.query.first()
+        nome = s.company_name if s and s.company_name and s.company_name != 'Minha Fatoring' else 'Fozesc'
+        return {
+            'empresa': nome,
+            'cnpj': s.cnpj if s else None,
+            'conta': conta,
+            'tipo': tipo,
+            'inicio': d1.isoformat(),
+            'fim': d2.isoformat(),
+            'gerado_em': datetime.now().strftime('%d/%m/%Y %H:%M'),
+            'resumo': resumo,
+            'por_conta': por_conta,
+            'categorias': categorias,
+            'extrato': {
+                'items': [{
+                    'id': l.id, 'data': l.date.isoformat(), 'descricao': l.description,
+                    'categoria': l.category or 'Sem categoria', 'conta': l.origin,
+                    'entrada': round(abs(l.amount), 2) if l.type == 'entrada' else None,
+                    'saida': round(abs(l.amount), 2) if l.type != 'entrada' else None,
+                    'saldo': round(saldo_antes + float(l.acumulado or 0), 2),
+                } for l in itens],
+                'total': total,
+                'page': page,
+                'pages': (total + per_page - 1) // per_page,
+                'per_page': per_page,
+            },
         }
 
     def gerar_relatorio_customizado(self, tipo, start_date=None, end_date=None):

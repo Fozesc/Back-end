@@ -40,3 +40,16 @@ def resumo():
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     return jsonify(dados)
+
+
+@bp.route('/caixa', methods=['GET'])
+@jwt_required()
+def caixa():
+    """Relatorio do caixa: geral ou de uma conta, com o extrato paginado."""
+    try:
+        return jsonify(service.relatorio_caixa(
+            request.args.get('inicio'), request.args.get('fim'),
+            request.args.get('conta', 'todas'), request.args.get('tipo', 'todos'),
+            request.args.get('page', 1, type=int), request.args.get('per_page', 100, type=int)))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
