@@ -25,8 +25,10 @@ def get_balances():
 @bp.route('', methods=['POST'])
 @jwt_required()
 def create():
-    data = request.json
-    return jsonify(service.create(data)), 201
+    try:
+        return jsonify(service.create(request.get_json(silent=True) or {})), 201
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
 @bp.route('/troca', methods=['POST'])
 @jwt_required()

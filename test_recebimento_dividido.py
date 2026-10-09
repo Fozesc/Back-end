@@ -234,15 +234,12 @@ def main():
                 Transaction.check_id.is_(None)).count()
             assert antigos == 0, "lancamento antigo (sem check_id) tinha que ser apagado"
 
-        # --------------- apagar o cheque nao trava na FK nem leva o caixa embora
-        r = http.delete(f'/api/checks/{id_b}', headers=cab)
+        # ------- apagar o cheque pede a senha e leva junto o que ele lancou no caixa
+        assert http.delete(f'/api/checks/{id_b}', headers=cab).status_code == 403
+        r = http.delete(f'/api/checks/{id_b}', headers=cab, json={'senha': SENHA})
         assert r.status_code == 200, r.data
-        with app.app_context():
-            sobrou = Transaction.query.filter(
-                Transaction.description.like('Recebimento Cheque%'),
-                Transaction.origin == 'Caixa').all()
-            assert len(sobrou) == 1 and sobrou[0].check_id is None, \
-                "o historico do caixa fica, com o vinculo em NULL"
+        assert [(c['tipo'], c['de'], c['para']) for c in r.get_json()['caixa']] == [('entrada', 300.0, None)], r.data
+        assert round(saldos()['caixa_total'], 2) == 0.0, "o recebimento do cheque apagado tinha que sair do caixa"
 
         with app.app_context():
             from app.models.domain import AuditLog

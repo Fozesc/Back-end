@@ -30,6 +30,11 @@ def calcular_linha(valor_face, dias, taxa_mensal, iof_ativo=False, iof_base=0.0,
     return juros, iof, arredondar(valor_face - juros - iof)
 
 
+def reais(valor):
+    """1234.5 -> '1.234,50' (texto do caixa)."""
+    return f"{valor:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+
+
 def calcular_comissao(juros_total, comissao, taxa_mensal):
     """Igual ao calcularComissao() da tela: `comissao` pontos dos `taxa_mensal` pontos da
     taxa (2 de 8% = 25% dos juros)."""
@@ -60,6 +65,21 @@ def agrupar(linhas):
         t.grupo_id = grupo
 
 
+def recalcular_total(grupo_id):
+    """A linha 'Pgto Borderô' (so informativa) e' o total que sai do banco: saidas - entradas
+    das linhas reais do mesmo grupo. Chamar quando uma linha do grupo sai do caixa; sem
+    linha real nenhuma, o total sai tambem. Grupo sem essa linha (prorrogacao) nao muda."""
+    total = Transaction.query.filter(Transaction.grupo_id == grupo_id, Transaction.type == 'saida',
+                                     Transaction.valor_informativo.isnot(None)).first()
+    if not total:
+        return
+    reais = Transaction.query.filter(Transaction.grupo_id == grupo_id, Transaction.valor_informativo.is_(None)).all()
+    if not reais:
+        db.session.delete(total)
+        return
+    total.valor_informativo = round(sum(-abs(t.amount) if t.type == 'entrada' else abs(t.amount) for t in reais), 2)
+
+
 def ler_comissao(data, taxa_mensal):
     try:
         comissao = float(data.get('comissao') or 0)
@@ -86,17 +106,25 @@ class OperationService:
             if isinstance(op_date, str):
                 op_date = datetime.strptime(op_date, '%Y-%m-%d').date()
 
-            conta_origem = data.get('account_source', 'Dinheiro') 
+            conta_origem = data.get('account_source') or 'Dinheiro'
+            if conta_origem not in ('Dinheiro', 'BB', 'Caixa'):
+                raise ValueError("Conta de saída inválida (use Dinheiro, BB ou Caixa)")
             origem_sistema = f"Sistema ({conta_origem})"
-            
-            dias_comp = int(data.get('dias_compensacao', 0))
-            comissao = ler_comissao(data, float(data['taxa_mensal']))
+
+            try:
+                taxa = float(data['taxa_mensal'])
+                dias_comp = int(data.get('dias_compensacao', 0))
+            except (TypeError, ValueError, KeyError):
+                raise ValueError("Taxa ou dias de compensação inválidos")
+            if not (math.isfinite(taxa) and 0 <= taxa <= 100) or not 0 <= dias_comp <= 30:
+                raise ValueError("Taxa (0 a 100%) ou dias de compensação (0 a 30) inválidos")
+            comissao = ler_comissao(data, taxa)
 
             new_operation = Operation(
                 client_id=data['client_id'],
                 client_name_snapshot=client.name,
                 operation_date=op_date,
-                monthly_rate=float(data['taxa_mensal']), 
+                monthly_rate=taxa,
                 compensation_days=dias_comp,
                 account_source=conta_origem,
                 notes=data.get('notes'),
@@ -121,6 +149,8 @@ class OperationService:
             iof_ativo = bool(data.get('iof_enabled', float(data.get('iof_amount') or 0) > 0))
             iof_base = float(data.get('iof_base', config.iof_rate if config else 0.38) or 0)
             iof_diario = float(data.get('iof_diario', config.iof_daily_rate if config else 0.0041) or 0)
+            if not (0 <= iof_base <= 10 and 0 <= iof_diario <= 1):
+                raise ValueError("IOF inválido")
 
             for n, item in enumerate(data['checks'], 1):
                 valor_face = float(item['valor'])
@@ -182,6 +212,16 @@ class OperationService:
             new_operation.iof_amount = round(acumulado_iof, 2)
             new_operation.total_net_value = liquido_entregue
 
+            # comissao descontada de um vale: abate ate o que falta nele e so o resto sai do caixa
+            vale, saldo_vale, no_vale = None, 0.0, 0.0
+            if data.get('vale_id') not in (None, ''):
+                if not new_operation.comissao_valor:
+                    raise ValueError("Só dá para abater num vale quando o borderô tem comissão")
+                from app.services.vale_service import travar_para_abater
+                vale, saldo_vale = travar_para_abater(data['vale_id'])
+                no_vale = round(min(new_operation.comissao_valor, saldo_vale), 2)
+            comissao_no_caixa = round(new_operation.comissao_valor - no_vale, 2)
+
             transaction = Transaction(
                 date=new_operation.operation_date,
                 description=f"Pgto Borderô #{new_operation.id} - {client.name}",
@@ -196,15 +236,22 @@ class OperationService:
                 # informativa) e' o total que sai do banco = cliente + comissao, as de baixo
                 rotulo = f"Borderô #{new_operation.id} - {client.name}"
                 transaction.description = f"Cliente recebe - {rotulo}"[:200]
-                agrupar([
+                linhas = [
                     linha_informativa(new_operation.operation_date, origem_sistema,
-                                      round(liquido_entregue + new_operation.comissao_valor, 2), 'saida',
+                                      round(liquido_entregue + comissao_no_caixa, 2), 'saida',
                                       f"Pgto {rotulo}", operation_id=new_operation.id),
                     transaction,
                     linha_comissao(new_operation.operation_date, origem_sistema, new_operation.comissao_valor,
-                                   rotulo, f"{comissao / new_operation.monthly_rate * 100:.4g}%".replace('.', ','),
+                                   rotulo + (f" · R$ {reais(no_vale)} descontados no vale #{vale.id}" if vale else ''),
+                                   f"{comissao / new_operation.monthly_rate * 100:.4g}%".replace('.', ','),
                                    operation_id=new_operation.id),
-                ])
+                ]
+                if vale:
+                    # a parte da comissao que paga o vale entra de volta na mesma conta
+                    from app.services.vale_service import abatimento
+                    linhas.append(abatimento(vale, saldo_vale, no_vale, new_operation.operation_date, origem_sistema,
+                                             f"comissão do {rotulo}", operation_id=new_operation.id))
+                agrupar(linhas)
             else:
                 db.session.add(transaction)
 
@@ -223,12 +270,26 @@ class OperationService:
                 f"Taxa: {new_operation.monthly_rate}% | Juros Total: R$ {new_operation.total_interest:.2f}\n"
                 + (f"Comissão: {comissao:g} de {new_operation.monthly_rate:g} pontos da taxa "
                    f"({comissao / new_operation.monthly_rate * 100:.1f}% dos juros) = "
-                   f"R$ {new_operation.comissao_valor:.2f}\n" if comissao else '') +
+                   f"R$ {new_operation.comissao_valor:.2f}"
+                   + (f" (R$ {no_vale:.2f} descontados no vale #{vale.id}"
+                      + (f", R$ {comissao_no_caixa:.2f} saíram de {conta_origem})" if comissao_no_caixa
+                         else ", nada saiu do caixa)") if vale else '')
+                   + "\n" if comissao else '') +
                 f"Valor Líquido Entregue: R$ {new_operation.total_net_value:.2f}\n"
                 f"Cheques ({len(data['checks'])}): {resumo_cheques_str}"
             )
 
             self.audit.log_action(user_name, 'CREATE', 'Borderô', detalhes)
+            if vale:
+                quitou = vale.status == 'Pago'
+                self.audit.log_action(
+                    user_name, 'BAIXA' if quitou else 'PAGAMENTO', 'Vale',
+                    f"Desconto no vale #{vale.id} com a comissão do Borderô #{new_operation.id} ({client.name}) "
+                    f"| R$ {no_vale:.2f} de R$ {saldo_vale:.2f}"
+                    + (" | quitado" if quitou else f" | resta R$ {saldo_vale - no_vale:.2f}")
+                    + f" | no caixa ({conta_origem}): comissão R$ {new_operation.comissao_valor:.2f} saiu e o desconto entrou"
+                    + (f", de verdade saíram R$ {comissao_no_caixa:.2f}" if comissao_no_caixa
+                       else ', nada saiu de verdade'))
                 
             return new_operation
 

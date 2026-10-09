@@ -5,6 +5,7 @@ from werkzeug.security import check_password_hash
 from app.models.domain import Vale, Transaction, User
 from app.services.audit_service import AuditService
 from app.services.check_service import CONTAS_CAIXA, CheckService
+from app.services.operation_service import recalcular_total
 
 MAX_POR_PAGINA = 100
 VALOR_MAXIMO = 10_000_000
@@ -125,6 +126,34 @@ def _serialize(v, pago=0.0):
     }
 
 
+def travar_para_abater(id):
+    """Vale em aberto que vai receber um abatimento, travado ate o fim da transacao (dois
+    abatimentos ao mesmo tempo nao passam do que falta), e quanto falta pagar nele."""
+    try:
+        id = int(id)
+    except (TypeError, ValueError):
+        raise ValueError('Vale inválido')
+    v = db.session.query(Vale).filter_by(id=id).with_for_update().first()
+    if not v:
+        raise ValueError('Vale não encontrado')
+    saldo = _serialize(v, _pagos([v.id]).get(v.id))['saldo']
+    if saldo <= 0:
+        raise ValueError(f'O vale #{v.id} já está quitado')
+    return v, saldo
+
+
+def abatimento(v, saldo, valor, data, conta, origem, **vinculo):
+    """Desconta `valor` (ate o `saldo`) da comissao no vale: entra como pagamento do vale na mesma
+    conta de onde a comissao sai inteira, entao do caixa so sai de verdade o que passa do vale.
+    Quita se cobrir o que falta. O chamador grava a linha junto com o resto da operacao."""
+    quitou = valor >= saldo - 0.005
+    if quitou:
+        v.status, v.data_pagamento, v.conta_pagamento = 'Pago', data, conta[:20]
+    return Transaction(date=data, amount=valor, type='entrada', origin=conta, category='Vale', vale_id=v.id,
+                       **vinculo, description=(f"{'Desconto' if quitou else 'Desconto parcial'} no vale #{v.id} - "
+                                               f"{_texto(v)} · {origem}")[:200])
+
+
 class ValeService:
     def __init__(self):
         self.audit = AuditService()
@@ -216,13 +245,16 @@ class ValeService:
         if not v:
             return None
         linhas = Transaction.query.with_entities(
-            Transaction.id, Transaction.date, Transaction.amount, Transaction.origin, Transaction.description
+            Transaction.id, Transaction.date, Transaction.amount, Transaction.origin, Transaction.description,
+            Transaction.operation_id, Transaction.check_id
         ).filter(Transaction.vale_id == id, Transaction.type == 'entrada').order_by(
             Transaction.date, Transaction.id).limit(MAX_PAGAMENTOS).all()
         return {
             **_serialize(v, sum(l.amount for l in linhas)),
-            'pagamentos': [{'id': l.id, 'data': l.date.isoformat(), 'valor': l.amount,
-                            'conta': l.origin, 'descricao': l.description} for l in linhas],
+            # desconto com comissao: o unico pagamento de vale ligado a um borderô/cheque
+            'pagamentos': [{'id': l.id, 'data': l.date.isoformat(), 'valor': l.amount, 'conta': l.origin,
+                            'descricao': l.description, 'abatimento': bool(l.operation_id or l.check_id)}
+                           for l in linhas],
         }
 
     def editar(self, id, dados):
@@ -300,6 +332,9 @@ class ValeService:
         for t in linhas:
             db.session.delete(t)
         db.session.delete(v)
+        db.session.flush()
+        for grupo in {t.grupo_id for t in linhas if t.grupo_id}:
+            recalcular_total(grupo)  # desconto de comissao que saiu: o total do borderô acompanha
         db.session.commit()
         self.audit.log_action(_usuario(), 'DELETE', 'Vale', retrato + ' [confirmado com senha]')
         return {'linhas_apagadas': len(linhas), 'saida_no_caixa': saida is not None}

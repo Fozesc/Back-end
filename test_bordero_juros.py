@@ -154,9 +154,9 @@ def main():
             assert ls[0].description.startswith('Pgto Borderô #') and ls[1].description.startswith('Cliente recebe - Borderô #')
             assert len({t.origin for t in ls}) == 1 and ls[2].description.startswith('Comissão (25% dos juros) - Borderô #')
         saldo_dinheiro = http.get('/api/transactions/balances', headers=cab).get_json()['bruto']['dinheiro_total']
-        lista = http.get('/api/transactions?per_page=3', headers=cab).get_json()
-        assert {l['grupo_id'] for l in lista['items']} == {ls[0].id}
-        assert [l['valor_informativo'] for l in lista['items'] if l['valor_informativo'] is not None] == [11121.82]
+        lista = http.get('/api/transactions', headers=cab, query_string={'per_page': 1, 'search': f'Borderô #{op.id} '}).get_json()
+        assert lista['total'] == 3 and {l['grupo_id'] for l in lista['items']} == {ls[0].id}
+        # o resumo e' do filtro inteiro (nao so da pagina) e a linha informativa nao soma de novo
         assert round(lista['summary']['saidas'], 2) == 11121.82, 'o total informativo nao soma de novo no caixa'
         assert http.put(f"/api/transactions/{ls[0].id}", headers=cab, json={'valor': 10}).status_code == 400, \
             'linha informativa nao se edita'

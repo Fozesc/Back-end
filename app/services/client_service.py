@@ -1,4 +1,4 @@
-from app.models.domain import Client, ClientNote, Operation, Check, User
+from app.models.domain import Client, ClientNote, Evento, Operation, Check, User
 from app import db
 from app.services.audit_service import AuditService
 from sqlalchemy import or_, and_, func, case
@@ -152,6 +152,7 @@ class ClientService:
                 synchronize_session=False)
             qtd_notas = ClientNote.query.filter_by(client_id=origem.id).update(
                 {'client_id': destino.id}, synchronize_session=False)
+            Evento.query.filter_by(client_id=origem.id).update({'client_id': destino.id}, synchronize_session=False)
             db.session.delete(origem)
             db.session.commit()
         except Exception:

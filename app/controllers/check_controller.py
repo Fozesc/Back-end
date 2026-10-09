@@ -118,12 +118,27 @@ def detalhes(id):
         return jsonify({'error': 'Título não encontrado'}), 404
     return jsonify(dados)
 
+@bp.route('/<int:id>/exclusao', methods=['GET'])
+@jwt_required()
+def previa_exclusao(id):
+    """O que apagar o titulo muda no caixa. Nada e' gravado."""
+    dados = service.delete(id, simular=True)
+    if dados is None:
+        return jsonify({'error': 'Título não encontrado'}), 404
+    return jsonify(dados)
+
 @bp.route('/<int:id>', methods=['DELETE'])
 @jwt_required()
 def delete(id):
-    if service.delete(id):
-        return jsonify({'message': 'Cheque removido'})
-    return jsonify({'error': 'Erro ao remover'}), 400
+    """Apaga o titulo e desfaz no caixa o que ele lancou. Exige a senha no corpo."""
+    data = request.get_json(silent=True) or {}
+    try:
+        dados = service.delete(id, data.get('senha'))
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    if dados is None:
+        return jsonify({'error': 'Título não encontrado'}), 404
+    return jsonify(dados)
 
 @bp.route('', methods=['POST'], strict_slashes=False)
 @bp.route('/', methods=['POST'], strict_slashes=False)

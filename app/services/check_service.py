@@ -1,4 +1,4 @@
-from app.models.domain import Check, Operation, Client, Transaction, CheckExtension, User
+from app.models.domain import Check, Operation, Client, Transaction, CheckExtension, User, Vale
 from app import db
 from app.services.audit_service import AuditService
 from app.utils.sanitizer import sanitize_input
@@ -8,7 +8,7 @@ import math
 import re
 from datetime import datetime, date
 from werkzeug.security import check_password_hash
-from app.services.operation_service import arredondar, agrupar, linha_comissao, linha_informativa
+from app.services.operation_service import arredondar, agrupar, calcular_comissao, linha_comissao, linha_informativa, reais
 
 # Marca que o import_planilha.py grava em Operation.notes. E' assim que o sistema
 # sabe que um cheque veio da planilha antiga, sem precisar de coluna nova.
@@ -40,6 +40,11 @@ MAX_PARTES = 10
 
 # teto da lista de titulos do mesmo borderô na tela de detalhes
 LIMITE_PARCELAS = 100
+
+STATUS_TITULO = ('Aguardando', 'Pago', 'Atrasado', 'Devolvido', 'Juridico')
+
+# linhas que o borderô lanca no caixa (sem check_id: sao do borderô inteiro)
+LINHAS_BORDERO = ('Compra de Ativos', 'Comissão', 'Informativo')
 
 # rotulo que o recebimento dividido grava no fim da descricao: "(Parte 1/2 · PIX)"
 RX_PARTE = re.compile(r'\(Parte (\d+)/\d+(?: · ([^)]+))?\)\s*$')
@@ -75,14 +80,26 @@ class CheckService:
 
     def create(self, data):
         try:
-            amount = float(data.get('valor', 0))
-            due_date_str = data.get('vencimento')
-            due_date = datetime.strptime(due_date_str, '%Y-%m-%d').date() if due_date_str else None
-            conta_saida = data.get('contaSaida', 'Dinheiro')
-            
+            amount = self._valor(data.get('valor'), 'Valor')
+            if not amount:
+                raise ValueError('Valor: tem que ser maior que zero')
+            due_date = self._data(data.get('vencimento'), 'Vencimento')
+            conta_saida = data.get('contaSaida') or 'Dinheiro'
+            if conta_saida not in CONTAS_CAIXA:
+                raise ValueError(f"Conta inválida (use {', '.join(CONTAS_CAIXA)})")
+            try:
+                cliente = db.session.get(Client, int(data.get('client_id')))
+            except (TypeError, ValueError):
+                cliente = None
+            if not cliente:
+                raise ValueError('Cliente não encontrado')
+        except ValueError as e:
+            return False, str(e)
+        try:
             # 1. Cria a Operação
             nova_operacao = Operation(
-                client_id=data.get('client_id'),
+                client_id=cliente.id,
+                client_name_snapshot=cliente.name,
                 operation_date=datetime.now().date(),
                 total_face_value=amount,
                 total_net_value=amount,
@@ -132,8 +149,7 @@ class CheckService:
         except Exception as e:
             db.session.rollback()
             print(f"Erro ao criar cheque: {e}")
-            return False, str(e)
-
+            return False, 'Erro ao criar o título'
 
     def update(self, id, data):
         """
@@ -181,13 +197,31 @@ class CheckService:
                 nova = self._data(data['data_pagamento'], 'Data de pagamento') if data['data_pagamento'] else None
                 if nova != check.payment_date:
                     mudancas.append(f"data de pagamento {check.payment_date} -> {nova}")
+                    if nova and check.payment_date:
+                        # o recebimento no caixa (e o imposto) vai junto para a data nova
+                        movidas = Transaction.query.filter(
+                            Transaction.check_id == check.id, Transaction.date == check.payment_date,
+                            or_(Transaction.category == 'Recebimento de Cheque',
+                                Transaction.description.like('Imposto Cheque%'))
+                        ).update({Transaction.date: nova}, synchronize_session=False)
+                        if movidas:
+                            mudancas.append(f"{movidas} lançamento(s) do recebimento no caixa foram para {nova}")
                     check.payment_date = nova
 
             if 'data_operacao' in data and check.operation:
                 nova = self._data(data['data_operacao'], 'Data da operação')
-                if nova != check.operation.operation_date:
-                    mudancas.append(f"data da operacao (borderô #{check.operation_id}) "
-                                    f"{check.operation.operation_date} -> {nova}")
+                antiga = check.operation.operation_date
+                if nova != antiga:
+                    mudancas.append(f"data da operacao (borderô #{check.operation_id}) {antiga} -> {nova}")
+                    # a saida do borderô no caixa (cliente, comissao, desconto no vale, total) vai junto
+                    movidas = Transaction.query.filter(
+                        Transaction.operation_id == check.operation_id, Transaction.date == antiga,
+                        or_(and_(Transaction.check_id.is_(None),
+                                 or_(Transaction.category.in_(LINHAS_BORDERO), Transaction.vale_id.isnot(None))),
+                            Transaction.category == 'Empréstimo Manual')
+                    ).update({Transaction.date: nova}, synchronize_session=False)
+                    if movidas:
+                        mudancas.append(f"{movidas} lançamento(s) do borderô no caixa foram para {nova}")
                     check.operation.operation_date = nova
 
             if 'observacao' in data and check.operation:
@@ -483,7 +517,9 @@ class CheckService:
         return len(lancamentos)
 
     def update_status(self, id, new_status, payment_data=None):
-        check = Check.query.get(id)
+        if new_status not in STATUS_TITULO:
+            raise ValueError(f"Status inválido (use {', '.join(STATUS_TITULO)})")
+        check = db.session.query(Check).filter_by(id=id).with_for_update().first()
         if not check: return False
 
         dados = payment_data if isinstance(payment_data, dict) else {}
@@ -649,7 +685,9 @@ class CheckService:
         Sem prorrogar (so pagamento parcial) nao ha juros: o pago abate o saldo direto.
         Caixa, titulo, historico e auditoria gravam juntos ou nada grava.
         """
-        check = db.session.get(Check, check_id)
+        # travado ate gravar: o mesmo pedido mandado 2 vezes espera o 1o e cai na validacao
+        # da nova data (que ja virou o vencimento atual), sem lancar nada duas vezes
+        check = db.session.query(Check).filter_by(id=check_id).with_for_update().first()
         if not check:
             return None
         if check.status == 'Pago':
@@ -715,6 +753,16 @@ class CheckService:
             if comissao_conta not in CONTAS_CAIXA:
                 raise ValueError(f"Conta da comissão inválida (use {', '.join(CONTAS_CAIXA)})")
             comissao_valor = arredondar(comissao_base * comissao / calculo['taxa_mensal'])
+
+        # comissao descontada de um vale: abate ate o que falta nele e so o que passar sai do caixa
+        vale, saldo_vale, no_vale = None, 0.0, 0.0
+        if dados.get('vale_id') not in (None, ''):
+            if not comissao_valor:
+                raise ValueError("Só dá para abater num vale quando a prorrogação tem comissão")
+            from app.services.vale_service import travar_para_abater
+            vale, saldo_vale = travar_para_abater(dados['vale_id'])
+            no_vale = round(min(comissao_valor, saldo_vale), 2)
+        comissao_no_caixa = round(comissao_valor - no_vale, 2)
 
         recebido = self._valor(dados.get('valor_recebido') or 0, 'Valor pago')
         if recebido > total_com_juros:
@@ -783,9 +831,16 @@ class CheckService:
                 # juros da prorrogacao = comissao (sai hoje) + o que fica para a empresa (so informativo)
                 rotulo = f"prorrogação do cheque #{numero} - {emitente}"
                 vinculo = {'operation_id': check.operation_id, 'check_id': check.id}
-                agrupar(linhas_caixa + [
-                    linha_comissao(hoje, comissao_conta, comissao_valor, rotulo,
-                                   f"{comissao / calculo['taxa_mensal'] * 100:.4g}%".replace('.', ','), **vinculo),
+                comissao_linhas = [linha_comissao(
+                    hoje, comissao_conta, comissao_valor,
+                    rotulo + (f" · R$ {reais(no_vale)} descontados no vale #{vale.id}" if vale else ''),
+                    f"{comissao / calculo['taxa_mensal'] * 100:.4g}%".replace('.', ','), **vinculo)]
+                if vale:
+                    # a parte da comissao que paga o vale entra de volta na mesma conta
+                    from app.services.vale_service import abatimento
+                    comissao_linhas.append(abatimento(vale, saldo_vale, no_vale, hoje, comissao_conta,
+                                                      f"comissão da {rotulo}", **vinculo))
+                agrupar(linhas_caixa + comissao_linhas + [
                     linha_informativa(hoje, comissao_conta, round(juros - comissao_valor, 2), 'entrada',
                                       f"Juros sem a comissão (informativo) - {rotulo}", **vinculo)])
             else:
@@ -821,6 +876,8 @@ class CheckService:
                 **calculo,
                 **({'comissao': comissao, 'comissao_base': comissao_base, 'comissao_valor': comissao_valor,
                     'comissao_conta': comissao_conta} if comissao_valor else {}),
+                **({'vale_id': vale.id, 'vale_abatido': no_vale, 'comissao_no_caixa': comissao_no_caixa}
+                   if vale else {}),
             }
             db.session.add(CheckExtension(
                 check_id=check.id, old_due_date=venc_atual, new_due_date=nova,
@@ -845,37 +902,135 @@ class CheckService:
                       f"abatido R$ {abatido:.2f})")
         if comissao_valor:
             texto += (f" | comissão {comissao:g} de {calculo['taxa_mensal']:g} pontos sobre juros R$ {comissao_base:.2f} "
-                      f"= R$ {comissao_valor:.2f} (saiu de {comissao_conta})")
+                      f"= R$ {comissao_valor:.2f}")
+            if vale:
+                texto += (f": R$ {no_vale:.2f} descontados no vale #{vale.id}"
+                          + (f" e R$ {comissao_no_caixa:.2f} saíram de {comissao_conta}" if comissao_no_caixa
+                             else ", nada saiu do caixa"))
+            else:
+                texto += f" (saiu de {comissao_conta})"
         if juros_nao_pagos:
             texto += f" | R$ {juros_nao_pagos:.2f} de juros ficaram no saldo"
         texto += f" | novo valor devido R$ {novo_total:.2f}"
         self.audit.log_action(self._get_current_user(),
                               'PRORROGACAO' if prorrogar else 'RECEBIMENTO PARCIAL', 'Cheque', texto)
+        if vale:
+            quitou = vale.status == 'Pago'
+            self.audit.log_action(
+                self._get_current_user(), 'BAIXA' if quitou else 'PAGAMENTO', 'Vale',
+                f"Desconto no vale #{vale.id} com a comissão da prorrogação do cheque #{numero} ({emitente}) "
+                f"| R$ {no_vale:.2f} de R$ {saldo_vale:.2f}"
+                + (" | quitado" if quitou else f" | resta R$ {saldo_vale - no_vale:.2f}")
+                + f" | no caixa ({comissao_conta}): comissão R$ {comissao_valor:.2f} saiu e o desconto entrou"
+                + (f", de verdade saíram R$ {comissao_no_caixa:.2f}" if comissao_no_caixa else ', nada saiu de verdade'))
         return self._serialize_check(check)
 
-    def delete(self, id):
-        cheque = Check.query.get(id)
+    def _tirar_do_bordero(self, cheque, sobra):
+        """O borderô perde o titulo: os totais e as linhas dele no caixa diminuem a parte do
+        titulo (o liquido que o cliente recebeu por ele e a comissao sobre os juros dele).
+        Sem titulo nenhum (`sobra` False) as linhas zeram. Devolve [(linha, valor novo)]."""
+        op = cheque.operation
+        face = float(cheque.original_amount if cheque.original_amount is not None else cheque.amount or 0)
+        juros, liquido = float(cheque.interest_amount or 0), float(cheque.net_amount or 0)
+        op.total_face_value = round((op.total_face_value or 0) - face, 2)
+        op.total_interest = round((op.total_interest or 0) - juros, 2)
+        op.total_net_value = round((op.total_net_value or 0) - liquido, 2)
+        if op.iof_amount:
+            op.iof_amount = max(round(op.iof_amount - max(face - juros - liquido, 0), 2), 0.0)
+        op.comissao_valor = calcular_comissao(op.total_interest, op.comissao, op.monthly_rate)
+
+        linhas = Transaction.query.filter(
+            Transaction.operation_id == op.id, Transaction.check_id.is_(None),
+            or_(Transaction.category.in_(LINHAS_BORDERO), Transaction.vale_id.isnot(None))).order_by(Transaction.id).all()
+        # comissao descontada num vale: o desconto fica, ate o tamanho da comissao nova
+        desconto = next((t for t in linhas if t.vale_id), None)
+        no_vale = round(min(abs(desconto.amount), op.comissao_valor), 2) if desconto and sobra else 0.0
+        novo, cliente, comissao = {}, 0.0, 0.0
+        for t in linhas:
+            if t.vale_id:
+                novo[t.id] = no_vale
+            elif t.category == 'Compra de Ativos':
+                novo[t.id] = cliente = round(abs(t.amount) - liquido, 2) if sobra else 0.0
+            elif t.category == 'Comissão':
+                novo[t.id] = comissao = op.comissao_valor if sobra else 0.0
+        for t in linhas:
+            if t.id not in novo:
+                novo[t.id] = round(cliente + comissao - no_vale, 2)
+        return [(t, novo[t.id]) for t in linhas]
+
+    def delete(self, id, senha=None, simular=False):
+        """Apaga o titulo e desfaz no caixa o que ele lancou: as linhas ligadas a ele
+        (recebimento, juros e comissao de prorrogacao, multa, emprestimo manual) saem e a
+        saida do borderô diminui a parte dele; o borderô que fica sem titulo sai inteiro.
+        Exige a senha: muda o saldo e nao tem desfazer. simular=True faz tudo e desfaz
+        (rollback), para a tela mostrar antes exatamente o que vai mudar no caixa."""
+        cheque = db.session.get(Check, id)
         if not cheque:
-            return False
+            return None
+        op_id = cheque.operation_id
+        info = (f"Cheque #{cheque.number or 'S/N'} - {cheque.issuer_name} (R$ {cheque.amount:.2f}) "
+                f"do borderô #{op_id}")
+        if not simular:
+            usuario = self._usuario_logado()
+            if not usuario or not check_password_hash(usuario.password_hash, str(senha or '')):
+                self.audit.log_action(self._get_current_user(), 'NEGADO', 'Cheque',
+                                      f"Senha incorreta ao tentar apagar o {info}")
+                raise PermissionError("Senha incorreta - o título não foi apagado")
 
-        # O modelo Check não possui campo `document` (o correto é `number`). O código
-        # antigo referenciava `cheque.document`, sempre estourava AttributeError e o log
-        # caía no fallback "ID: X", perdendo a informação do cheque. Corrigido.
         try:
-            info = f"Cheque #{cheque.number or 'S/N'} - {cheque.issuer_name} (R$ {cheque.amount})"
+            sobra = Check.query.filter(Check.operation_id == op_id, Check.id != cheque.id).first() is not None
+            mudancas = [(t, 0.0) for t in Transaction.query.filter_by(check_id=cheque.id).order_by(Transaction.id)]
+            mudancas += self._tirar_do_bordero(cheque, sobra)
+            caixa, vales = [], []
+            for t, valor in mudancas:
+                antes = abs(t.amount if t.valor_informativo is None else t.valor_informativo)
+                if t.valor_informativo is None and valor != round(antes, 2):
+                    caixa.append({'descricao': t.description, 'conta': t.origin, 'data': t.date.isoformat(),
+                                  'tipo': t.type, 'de': round(antes, 2), 'para': valor if valor > 0 else None})
+                if t.vale_id and t.type == 'entrada' and valor < round(antes, 2):
+                    # vale abatido com a comissao deste titulo: volta a dever o que sai do abatimento
+                    vales.append({'vale': t.vale_id, 'valor': round(antes - valor, 2)})
+                    v = db.session.get(Vale, t.vale_id)
+                    if v and v.status == 'Pago':
+                        v.status, v.data_pagamento, v.conta_pagamento = 'Aberto', None, None
+                if valor <= 0:
+                    db.session.delete(t)
+                elif t.valor_informativo is None:
+                    t.amount = valor if t.type == 'entrada' else -valor
+                else:
+                    t.valor_informativo = valor
+            db.session.flush()
+            db.session.delete(cheque)
+            db.session.flush()
+            bordero_apagado = not sobra and Transaction.query.filter_by(operation_id=op_id).first() is None
+            if bordero_apagado:
+                db.session.delete(db.session.get(Operation, op_id))
+                db.session.flush()
+            resultado = {
+                'bordero': op_id,
+                'bordero_apagado': bordero_apagado,
+                'caixa': caixa,
+                'vales': vales,
+                'efeito_saldo': round(sum(((c['para'] or 0) - c['de']) * (1 if c['tipo'] == 'entrada' else -1)
+                                          for c in caixa), 2),
+            }
+            if simular:
+                db.session.rollback()
+                return resultado
+            db.session.commit()
         except Exception:
-            info = f"ID: {cheque.id}"
+            db.session.rollback()
+            raise
 
-        db.session.delete(cheque)
-        db.session.commit()
-
+        detalhe = '; '.join(f"{c['tipo']} '{c['descricao']}' ({c['conta']}, {c['data']}) R$ {c['de']:.2f} -> "
+                            + (f"R$ {c['para']:.2f}" if c['para'] else 'apagada') for c in caixa)
         self.audit.log_action(
-            self._get_current_user(), 
-            'DELETE', 
-            'Cheque', 
-            f"Excluiu permanentemente: {info}"
-        )
-        return True
+            self._get_current_user(), 'DELETE', 'Cheque',
+            f"Excluiu permanentemente: {info} | Caixa: {detalhe or 'nada mudou'}"
+            + (f" | o borderô #{op_id} ficou sem títulos e foi apagado" if bordero_apagado else '')
+            + (' | volta a dever: ' + ', '.join(f"vale #{c['vale']} R$ {c['valor']:.2f}" for c in vales) if vales else '')
+            + " [confirmado com senha]")
+        return resultado
 
     def _serialize_check(self, c):
 
@@ -886,9 +1041,10 @@ class CheckService:
         if getattr(c, 'status', '') == 'Devolvido':
             tx_dev = Transaction.query.filter(
                 Transaction.operation_id == c.operation_id,
+                or_(Transaction.check_id == c.id, Transaction.check_id.is_(None)),
                 Transaction.category == 'Multas e Juros',
                 Transaction.description.like("Multa Devolução%")
-            ).order_by(Transaction.id.desc()).first()
+            ).order_by(Transaction.check_id.is_(None), Transaction.id.desc()).first()
             if tx_dev:
                 forma_devolucao = tx_dev.origin
 
@@ -975,6 +1131,8 @@ class CheckService:
                   .filter(Check.operation_id == op.id)
                   .order_by(Check.due_date.asc(), Check.id.asc()).limit(LIMITE_PARCELAS).all())
         total_titulos = Check.query.filter_by(operation_id=op.id).count()
+        abat = Transaction.query.with_entities(Transaction.vale_id, Transaction.amount).filter(
+            Transaction.operation_id == op.id, Transaction.check_id.is_(None), Transaction.vale_id.isnot(None)).first()
         return {
             **self._serialize_check(c),
             'bordero': {
@@ -987,6 +1145,7 @@ class CheckService:
                 'iof': float(op.iof_amount or 0),
                 'comissao': float(op.comissao or 0),
                 'comissao_valor': float(op.comissao_valor or 0),
+                'comissao_vale': {'vale': abat.vale_id, 'valor': abat.amount} if abat else None,
                 'valor_total': float(op.total_face_value or 0),
                 'juros_total': float(op.total_interest or 0),
                 'liquido_entregue': float(op.total_net_value or 0),

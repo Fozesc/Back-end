@@ -7,7 +7,7 @@ Rode:  ./venv/bin/python test_relatorio_caixa.py
 """
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 
 URL_REAL = os.getenv('DATABASE_URL') or ''
 if not URL_REAL:
@@ -23,6 +23,7 @@ os.environ.setdefault('JWT_SECRET_KEY', 'teste')
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
+FUTURO = date.today() + timedelta(days=10)
 SENHA = 'Senha#Teste123'
 _app = _db = None
 
@@ -67,6 +68,7 @@ def main():
             t(date(2026, 9, 9), -100, 'saida', 'Dinheiro', 'Troca', 'troca')
             t(date(2026, 9, 9), 100, 'entrada', 'BB', 'Troca', 'troca')
             t(date(2026, 10, 5), 7, 'entrada', 'Dinheiro', 'Geral', 'depois do periodo')
+            t(FUTURO, 5, 'entrada', 'Dinheiro', 'Geral', 'lancado com data futura')
             db.session.commit()
 
         r = http.post('/api/auth/login', json={'email': 'teste@fozesc.com', 'password': SENHA})
@@ -123,16 +125,21 @@ def main():
         assert p2['pages'] == 3 and [i['saldo'] for i in p2['items']] == [1350, 1430], p2
         assert rel(per_page=99999)['extrato']['per_page'] == 1000, 'teto da pagina'
 
-        # ------------------- ate hoje: bate com o saldo do Fluxo de Caixa conta por conta
-        tudo = rel(inicio='2020-01-01', fim='2030-12-31')
+        # ---- tudo (sem datas): do 1o ao ultimo lancamento, bate com o Fluxo de Caixa conta por conta
+        tudo = rel(inicio='', fim='')
+        assert (tudo['inicio'], tudo['fim']) == ('2026-08-31', FUTURO.isoformat()), (tudo['inicio'], tudo['fim'])
         saldos = http.get('/api/transactions/balances', headers=cab).get_json()['bruto']
         por = {c['conta']: c['saldo_final'] for c in tudo['por_conta']}
         assert (por['Dinheiro'], por['BB'], por['Caixa']) == \
             (saldos['dinheiro_total'], saldos['bb_total'], saldos['caixa_total']), (por, saldos)
+        # ate a data escolhida: o lancado depois dela fica de fora so no relatorio
+        ate_hoje = rel(inicio='2020-01-01', fim=date.today().isoformat())
+        assert ate_hoje['resumo']['saldo_final'] == round(tudo['resumo']['saldo_final'] - 5, 2), ate_hoje['resumo']
 
         print("OK: relatorio do caixa geral e por conta (saldo anterior, entradas, saidas, saldo final), "
               "categorias, extrato com saldo linha a linha (tambem filtrando so entradas/saidas), "
-              "linha informativa fora, paginacao com teto, validacoes e bate com o saldo do Fluxo de Caixa.")
+              "linha informativa fora, paginacao com teto, validacoes, ate a data escolhida ou tudo, "
+              "e o tudo bate com o saldo do Fluxo de Caixa (data futura junto).")
     finally:
         if _app is not None:
             with _app.app_context():

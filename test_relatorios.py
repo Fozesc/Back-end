@@ -119,7 +119,7 @@ def main():
                 Check(operation_id=op_dentro.id, due_date=date(2026, 6, 16),
                       amount=200.0, interest_amount=20.0, net_amount=180.0,
                       status='Devolvido', issuer_name='Emitente Devolvido', number='444'),
-                # aguardando -> NAO e inadimplencia
+                # aguardando que ja venceu -> atrasado (igual a tela de Titulos)
                 Check(operation_id=op_dentro.id, due_date=date(2026, 6, 28),
                       amount=700.0, interest_amount=70.0, net_amount=630.0,
                       status='Aguardando', issuer_name='Emitente Aberto', number='555'),
@@ -210,29 +210,30 @@ def main():
         top = next(t for t in d['tabelas'] if 'Maiores clientes' in t['titulo'])
         assert top['linhas'] == [['Cliente Teste', 320.0]], top
 
-        # --- INADIMPLENCIA: so Atrasado/Devolvido/Juridico que contam ---------
+        # --- INADIMPLENCIA: Atrasado (inclusive Aguardando vencido)/Devolvido/Juridico
         d = resumo('inadimplencia').get_json()
         v = valores(d)
         assert v['Juridico'] == 500.0, v          # sem os 8888 do historico
         assert v['Devolvido'] == 200.0, v
-        assert v['Atrasado'] == 0.0, v
-        assert v['Total em atraso'] == 700.0, v
-        assert v['Quantidade de cheques'] == 2, v
+        assert v['Atrasado'] == 700.0, v          # Aguardando que venceu em 28/06
+        assert v['Total em atraso'] == 1400.0, v
+        assert v['Quantidade de cheques'] == 3, v
         cheques = next(t for t in d['tabelas'] if t['titulo'] == 'Cheques do período')
-        assert len(cheques['linhas']) == 2 and cheques['truncado'] is False, cheques
+        assert len(cheques['linhas']) == 3 and cheques['truncado'] is False, cheques
+        assert {l[4] for l in cheques['linhas']} == {'Atrasado', 'Juridico', 'Devolvido'}, cheques
         # o total do rodapé tem que fechar com a lista impressa
         assert round(sum(l[5] for l in cheques['linhas']), 2) == v['Total em atraso'], cheques
         nomes = {l[2] for l in cheques['linhas']}
-        assert nomes == {'Emitente Juridico', 'Emitente Devolvido'}, nomes
+        assert nomes == {'Emitente Juridico', 'Emitente Devolvido', 'Emitente Aberto'}, nomes
         assert 'Historico Juridico' not in nomes, nomes
 
         # pizza por situação e barras de maiores devedores, sem o histórico
         pizza = next(g for g in d['graficos'] if g['tipo'] == 'pizza')
-        assert set(pizza['labels']) == {'Juridico', 'Devolvido'}, pizza
-        assert round(sum(pizza['series'][0]['dados']), 2) == 700.0, pizza
+        assert set(pizza['labels']) == {'Atrasado', 'Juridico', 'Devolvido'}, pizza
+        assert round(sum(pizza['series'][0]['dados']), 2) == 1400.0, pizza
         devedores = next(g for g in d['graficos'] if g['titulo'] == 'Maiores devedores')
-        assert devedores['series'][0]['dados'] == [700.0], devedores
-        assert {x['label']: x['valor'] for x in d['destaques']}['Cheques'] == 2, d['destaques']
+        assert devedores['series'][0]['dados'] == [1400.0], devedores
+        assert {x['label']: x['valor'] for x in d['destaques']}['Cheques'] == 3, d['destaques']
 
         # --- periodo realmente filtra ----------------------------------------
         d = resumo('lucro', '2026-03-01', '2026-03-31').get_json()

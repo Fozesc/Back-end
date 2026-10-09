@@ -1,6 +1,6 @@
 from app import db
 from app.models.domain import Check, Transaction, CompanySettings, Operation
-from sqlalchemy import func, case
+from sqlalchemy import func, case, and_
 from datetime import datetime, timedelta
 
 class DashboardService:
@@ -25,20 +25,17 @@ class DashboardService:
         # Carteira = títulos ativos "na rua" (a receber). Passa a incluir 'Prorrogado'
         # (renegociado, o cliente ainda deve) além de 'Aguardando'. Antes o cheque
         # prorrogado sumia da carteira, subestimando o total a receber.
-        carteira = db.session.query(func.sum(Check.amount)).filter(
-            Check.status.in_(['Aguardando', 'Prorrogado']),
-            Check.fora_do_calculo.is_(False)
-        ).scalar() or 0.0
-        inadimplencia = db.session.query(func.sum(Check.amount)).filter(
-            Check.status.in_(['Atrasado', 'Devolvido', 'Juridico']),
-            Check.fora_do_calculo.is_(False)
-        ).scalar() or 0.0
-
+        # Aguardando que ja venceu conta como Atrasado (inadimplencia), igual a tela de
+        # Titulos e o Calendario: o status gravado so vira Atrasado se alguem marcar.
+        situacao = case((and_(Check.status == 'Aguardando', Check.due_date < datetime.now().date()), 'Atrasado'),
+                        else_=Check.status)
         status_sums = db.session.query(
-            Check.status, func.sum(Check.amount)
-        ).filter(Check.fora_do_calculo.is_(False)).group_by(Check.status).all()
-        
+            situacao, func.sum(Check.amount)
+        ).filter(Check.fora_do_calculo.is_(False)).group_by(situacao).all()
+
         status_map = {s: float(v or 0) for s, v in status_sums}
+        carteira = status_map.get('Aguardando', 0.0) + status_map.get('Prorrogado', 0.0)
+        inadimplencia = sum(status_map.get(s, 0.0) for s in ('Atrasado', 'Devolvido', 'Juridico'))
         pie_data = [
             status_map.get('Aguardando', 0),
             status_map.get('Pago', 0),      
@@ -82,8 +79,8 @@ class DashboardService:
                 'total': round(float(total_hoje or 0), 2),
             },
             'kpis': {
-                'capital': capital, 'lucro': lucro,
-                'carteira': carteira, 'inadimplencia': inadimplencia
+                'capital': capital, 'lucro': round(lucro, 2),
+                'carteira': round(carteira, 2), 'inadimplencia': round(inadimplencia, 2)
             },
             'charts': {
                 'pie_chart': pie_data,

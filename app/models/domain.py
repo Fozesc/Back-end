@@ -246,6 +246,26 @@ class ClientNote(db.Model):
     editado_em = db.Column(db.DateTime)
     __table_args__ = (db.Index('ix_client_notes_client_criado', 'client_id', 'criado_em'),)
 
+# --- CALENDARIO ---
+# Evento, nota ou lembrete numa data. Com `valor` + `previsao` ('entrada'/'saida') entra
+# na previsao do caixa ate ser marcado como concluido (ai o dinheiro ja esta no caixa).
+class Evento(db.Model):
+    __tablename__ = 'eventos'
+    id = db.Column(db.Integer, primary_key=True)
+    data = db.Column(db.Date, nullable=False, index=True)
+    titulo = db.Column(db.String(120), nullable=False)
+    descricao = db.Column(db.Text)
+    tipo = db.Column(db.String(20), nullable=False, default='evento')
+    client_id = db.Column(db.Integer, db.ForeignKey('clients.id', ondelete='SET NULL'), nullable=True)
+    valor = db.Column(db.Float)
+    previsao = db.Column(db.String(10))
+    concluido = db.Column(db.Boolean, nullable=False, default=False)
+    autor = db.Column(db.String(100), nullable=False)
+    criado_em = db.Column(db.DateTime, nullable=False, default=datetime.now)
+
+    client = db.relationship('Client')
+
+
 # --- VALE (adiantamento) ---
 # Sair o vale tira o dinheiro da conta (saida no caixa); dar baixa devolve (entrada).
 class Vale(db.Model):

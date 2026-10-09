@@ -163,8 +163,9 @@ class HistoryService:
             })
 
         # Lançamentos do mês (o extrato)
+        # linha so informativa (total do borderô, juros sem a comissao) fica fora: nao e' dinheiro
         lancs = Transaction.query.filter(
-            Transaction.date >= start, Transaction.date <= end
+            Transaction.date >= start, Transaction.date <= end, Transaction.valor_informativo.is_(None)
         ).order_by(Transaction.date.desc(), Transaction.id.desc()).all()
 
         lancamentos = [{

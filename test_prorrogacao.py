@@ -277,8 +277,10 @@ def main():
             assert any('AJUSTE MANUAL' in (a.description or '') for a in AuditLog.query.all())
 
             # ------------------ 9. carteira usa o saldo de hoje; relatorio usa o de entrada
-            carteira = DashboardService().get_dashboard_data()['kpis']['carteira']
-            assert round(carteira, 2) == round(db.session.get(Check, id_a).amount + 450 + db.session.get(Check, id_d).amount, 2), carteira
+            # (vencido conta em inadimplencia, a vencer em carteira: os dois com o valor de hoje)
+            k = DashboardService().get_dashboard_data()['kpis']
+            assert round(k['carteira'] + k['inadimplencia'], 2) == round(
+                db.session.get(Check, id_a).amount + 450 + db.session.get(Check, id_d).amount, 2), k
             operado = ReportService()._resumo_lucro(date(2026, 9, 1), date(2026, 9, 30))
             linha = next(x for x in operado['linhas'] if x['label'] == 'Valor de face operado no período')
             assert linha['valor'] == 2600.0, linha

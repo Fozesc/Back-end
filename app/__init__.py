@@ -124,6 +124,24 @@ def create_app():
                 description=f"Status Prorrogado virou Aguardando em {len(ids)} cheque(s) "
                             f"(ids: {', '.join(map(str, sorted(ids)))}). A prorrogação continua "
                             f"no histórico de cada cheque."))
+        # Borderô com todos os titulos apagados antes de a exclusao desfazer o caixa (2.5): a
+        # saida dele continuava no caixa sem titulo nenhum. Sai agora, e o borderô vazio tambem.
+        orfas = db.session.execute(text(
+            "DELETE FROM transactions t WHERE t.operation_id IS NOT NULL AND t.check_id IS NULL "
+            "AND t.category IN ('Compra de Ativos', 'Comissão', 'Informativo') "
+            "AND NOT EXISTS (SELECT 1 FROM checks c WHERE c.operation_id = t.operation_id) "
+            "RETURNING t.id, t.operation_id, t.description, t.amount, t.origin, t.date")).all()
+        vazios = sorted(i for (i,) in db.session.execute(text(
+            "DELETE FROM operations o WHERE NOT EXISTS (SELECT 1 FROM checks c WHERE c.operation_id = o.id) "
+            "AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.operation_id = o.id) RETURNING o.id")))
+        if orfas or vazios:
+            db.session.add(domain.AuditLog(
+                user_name='Sistema', action='DELETE', target='FluxoCaixa',
+                description='Borderô sem títulos (apagados antes da versão 2.5) saiu do caixa: '
+                            + '; '.join(f"#{i} '{d}' R$ {v:.2f} ({o}, {dt:%d/%m/%Y})"
+                                        for i, _, d, v, o, dt in orfas if v)
+                            + (f" | borderô(s) vazio(s) apagado(s): {', '.join(f'#{i}' for i in vazios)}"
+                               if vazios else '')))
         db.session.commit()
 
 

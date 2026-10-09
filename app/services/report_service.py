@@ -372,7 +372,10 @@ class ReportService:
     # 3. Cheques em atraso
     # ------------------------------------------------------------------ #
     def _resumo_inadimplencia(self, d1, d2):
-        filtros = (Check.status.in_(STATUS_INADIMPLENTE),
+        # Aguardando que ja venceu tambem esta em atraso (igual a tela de Titulos)
+        vencido = and_(Check.status == 'Aguardando', Check.due_date < datetime.now().date())
+        situacao = case((vencido, 'Atrasado'), else_=Check.status)
+        filtros = (or_(Check.status.in_(STATUS_INADIMPLENTE), vencido),
                    Check.fora_do_calculo.is_(False),
                    Check.due_date >= d1, Check.due_date <= d2)
 
@@ -381,14 +384,14 @@ class ReportService:
         ).filter(*filtros).one()
 
         por_status = db.session.query(
-            Check.status, func.coalesce(func.sum(Check.amount), 0.0)
-        ).filter(*filtros).group_by(Check.status).all()
+            situacao, func.coalesce(func.sum(Check.amount), 0.0)
+        ).filter(*filtros).group_by(situacao).all()
         mapa = {s: float(v or 0) for s, v in por_status}
 
         # Colunas explicitas (nao SELECT *) e join unico - sem N+1 para pegar o cliente.
         linhas = db.session.query(
             Check.due_date, Check.number, Check.issuer_name, Check.amount,
-            Check.status, Client.name
+            situacao, Client.name
         ).select_from(Check).join(Operation, Check.operation_id == Operation.id)\
          .join(Client, Operation.client_id == Client.id)\
          .filter(*filtros).order_by(Check.due_date.asc(), Check.id.asc())\
@@ -452,7 +455,12 @@ class ReportService:
     def relatorio_caixa(self, inicio, fim, conta='todas', tipo='todos', page=1, per_page=100):
         """Relatorio do caixa (tela + PDF): saldo anterior, entradas, saidas e saldo final
         da conta escolhida (ou de todas), por conta, por categoria e o extrato com o saldo
-        depois de cada lancamento. Tudo somado no banco; o extrato vem paginado."""
+        depois de cada lancamento. Tudo somado no banco; o extrato vem paginado.
+        Sem inicio e sem fim = tudo: do primeiro ao ultimo lancamento (data futura junto)."""
+        if not inicio and not fim:
+            primeiro, ultimo = db.session.query(func.min(Transaction.date), func.max(Transaction.date)).one()
+            hoje = datetime.now().date()
+            inicio, fim = (primeiro or hoje).isoformat(), (ultimo or hoje).isoformat()
         d1, d2 = self._periodo(inicio, fim)
         conta = (conta or 'todas').lower()
         if conta not in ('todas', *FILTRO_CONTA):

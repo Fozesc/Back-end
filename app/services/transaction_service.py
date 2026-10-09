@@ -1,10 +1,34 @@
+import math
 from app.models.domain import Transaction, CompanySettings, User, Check, Operation, Vale, conta_padrao
+from app.services.operation_service import recalcular_total
 from app import db
 from app.services.audit_service import AuditService
 from sqlalchemy import func, case, or_
 from datetime import datetime, date
 from werkzeug.security import check_password_hash
 from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
+
+TIPOS = ('entrada', 'saida')
+
+
+def _valor(bruto):
+    try:
+        v = round(abs(float(bruto)), 2)
+    except (TypeError, ValueError):
+        raise ValueError('Valor inválido')
+    if not math.isfinite(v) or v <= 0:
+        raise ValueError('O valor tem que ser maior que zero')
+    return v
+
+
+def _data(bruto):
+    if not isinstance(bruto, str):
+        return bruto
+    try:
+        return datetime.strptime(bruto[:10], '%Y-%m-%d').date()
+    except ValueError:
+        raise ValueError('Data inválida')
+
 
 class TransactionService:
     def __init__(self):
@@ -34,13 +58,13 @@ class TransactionService:
         """De onde a linha veio: baixa de cheque, bordero ou lancamento a mao.
         Apagar uma linha vinculada deixa o cheque 'Pago' sem o dinheiro no caixa -
         por isso o vinculo vai para a tela (aviso) e para a auditoria."""
+        if t.vale_id:
+            return f"{'pagamento' if t.type == 'entrada' else 'saída'} do vale #{t.vale_id}"
         if t.check_id:
             c = db.session.get(Check, t.check_id)
             if c:
                 return f"recebimento do cheque #{c.number or 'S/N'} ({c.issuer_name or 'sem emitente'})"
             return f"recebimento de cheque (#{t.check_id}, ja apagado)"
-        if t.vale_id:
-            return f"{'pagamento' if t.type == 'entrada' else 'saída'} do vale #{t.vale_id}"
         if t.operation_id:
             op = db.session.get(Operation, t.operation_id)
             if op:
@@ -126,13 +150,15 @@ class TransactionService:
         }
 
         # 4. Cheques na rua (para o cálculo do disponível)
+        # "por origem" = a conta de onde o dinheiro saiu (a do borderô). Antes classificava
+        # pelo banco do CHEQUE: cheque do Banco do Brasil pago com dinheiro aparecia em BB.
         cheques_na_rua = db.session.query(
-            Check.bank, 
+            Operation.account_source,
             func.sum(Check.amount)
-        ).filter(
+        ).join(Operation, Check.operation_id == Operation.id).filter(
             Check.status.in_(['Aguardando', 'Atrasado', 'Prorrogado']),
             Check.fora_do_calculo.is_(False)   # historico da planilha nao esta "na rua"
-        ).group_by(Check.bank).all()
+        ).group_by(Operation.account_source).all()
 
         na_rua_map = {'BRASIL': 0.0, 'CAIXA': 0.0, 'DINHEIRO': 0.0}
         for banco, valor in cheques_na_rua:
@@ -156,16 +182,20 @@ class TransactionService:
         # Isso podia sumir com lançamentos silenciosamente. Uma listagem NÃO deve apagar
         # dados, então foi removido. Nada legítimo é afetado (lançamentos válidos têm
         # amount e date preenchidos).
-        query = Transaction.query.order_by(Transaction.date.desc(), Transaction.id.desc())
-        if search: query = query.filter(Transaction.description.ilike(f"%{search}%"))
-        if date_filter: query = query.filter(func.date(Transaction.date) == date_filter)
-        if type_filter and type_filter != 'todos': query = query.filter(Transaction.type == type_filter)
+        filtros = []
+        if search: filtros.append(Transaction.description.ilike(f"%{search}%"))
+        if date_filter: filtros.append(func.date(Transaction.date) == date_filter)
+        if type_filter and type_filter != 'todos': filtros.append(Transaction.type == type_filter)
+        query = Transaction.query.filter(*filtros).order_by(Transaction.date.desc(), Transaction.id.desc())
 
         pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-        # Usa valor ABSOLUTO por tipo para não misturar sinais: borderô grava saída
-        # negativa e cheque manual grava saída positiva. (Mesma lógica robusta de get_balances.)
-        entradas = sum(abs(t.amount or 0) for t in pagination.items if t.type == 'entrada')
-        saidas = sum(abs(t.amount or 0) for t in pagination.items if t.type != 'entrada')
+        # Totais do FILTRO inteiro (antes somava so a pagina da tela), somados no banco.
+        # Valor absoluto por tipo: borderô grava saida negativa e lancamento antigo, positiva.
+        entradas, saidas = db.session.query(
+            func.coalesce(func.sum(case((Transaction.type == 'entrada', func.abs(Transaction.amount)), else_=0.0)), 0.0),
+            func.coalesce(func.sum(case((Transaction.type != 'entrada', func.abs(Transaction.amount)), else_=0.0)), 0.0),
+        ).filter(*filtros).one()
+        entradas, saidas = round(float(entradas), 2), round(float(saidas), 2)
 
         return {
             'items': [self._serialize(t) for t in pagination.items],
@@ -176,17 +206,19 @@ class TransactionService:
         }
 
     def create(self, data):
-        val = data.get('amount') or data.get('valor')
-        desc = data.get('description') or data.get('descricao') or 'Lançamento Manual'
-        dt = data.get('date') or data.get('data') or datetime.now()
-        if isinstance(dt, str): dt = datetime.strptime(dt[:10], '%Y-%m-%d').date()
+        """Lancamento a mao. Nao aceita vinculo (borderô, cheque, vale): esses so nascem
+        pelas telas deles, senao o caixa deixa de bater com o titulo."""
+        tipo = data.get('type') or data.get('tipo') or 'saida'
+        if tipo not in TIPOS:
+            raise ValueError('Tipo inválido (use entrada ou saída)')
+        valor = _valor(data.get('amount') or data.get('valor'))
+        desc = str(data.get('description') or data.get('descricao') or '').strip()[:200] or 'Lançamento Manual'
+        dt = _data(data.get('date') or data.get('data') or datetime.now().date())
 
         new_t = Transaction(
-            date=dt, description=desc, amount=float(val or 0.0),
-            type=data.get('type') or data.get('tipo') or 'saida',
+            date=dt, description=desc, amount=valor if tipo == 'entrada' else -valor, type=tipo,
             origin=data.get('origin') or data.get('origem') or 'Dinheiro',
-            category=data.get('category') or 'Geral',
-            operation_id=data.get('operation_id')
+            category=str(data.get('category') or 'Geral')[:50],
         )
         db.session.add(new_t)
         db.session.commit()
@@ -249,19 +281,27 @@ class TransactionService:
         antigo_valor = t.amount
         # ---------------------------------------
 
-        if 'date' in data or 'data' in data:
-            dt = data.get('date') or data.get('data')
-            t.date = datetime.strptime(dt[:10], '%Y-%m-%d').date() if isinstance(dt, str) else dt
-            
-        if 'description' in data: t.description = data['description']
-        elif 'descricao' in data: t.description = data['descricao']
-        
+        # linha de borderô, titulo ou vale: valor e tipo so mudam pela tela de origem, senao
+        # o caixa deixa de bater com ela. Descricao, data e conta podem mudar aqui.
+        vinculo = self._vinculo(t)
         val = data.get('amount') or data.get('valor')
-        if val is not None: t.amount = float(val)
-        
-        if not t.troca_id:
-            if 'type' in data: t.type = data['type']
-            elif 'tipo' in data: t.type = data['tipo']
+        valor = _valor(val) if val is not None else abs(t.amount)
+        tipo = t.type if t.troca_id else (data.get('type') or data.get('tipo') or t.type)
+        if tipo not in TIPOS:
+            raise ValueError('Tipo inválido (use entrada ou saída)')
+        if vinculo and (abs(valor - abs(t.amount)) > 0.005 or tipo != t.type):
+            raise ValueError(f"Este lançamento vem de: {vinculo}. O valor e o tipo só mudam pela tela de "
+                             f"origem; aqui dá para mudar descrição, data e conta.")
+
+        if 'date' in data or 'data' in data:
+            t.date = _data(data.get('date') or data.get('data'))
+
+        if 'description' in data: t.description = str(data['description'] or '').strip()[:200] or t.description
+        elif 'descricao' in data: t.description = str(data['descricao'] or '').strip()[:200] or t.description
+
+        if not vinculo:
+            t.type = tipo
+            t.amount = valor if tipo == 'entrada' else -valor
         
         if 'origin' in data: t.origin = conta_padrao(data['origin'])
         elif 'origem' in data: t.origin = conta_padrao(data['origem'])
@@ -322,6 +362,10 @@ class TransactionService:
             retrato += f" | vale #{vale.id} voltou para Aberto"
 
         db.session.delete(t)
+        if t.grupo_id:
+            # o total do borderô ("Pgto Borderô") acompanha a linha que saiu
+            db.session.flush()
+            recalcular_total(t.grupo_id)
         db.session.commit()
 
         self.audit.log_action(self._get_current_user(), 'DELETE', 'FluxoCaixa', retrato)
