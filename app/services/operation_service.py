@@ -346,18 +346,26 @@ class OperationService:
             'id': op.id,
             'client_id': op.client_id,
             'date': op.operation_date.strftime('%Y-%m-%d'),
-            'total_face_value': op.total_face_value, 
+            'total_face_value': op.total_face_value,
             'total_net_value': op.total_net_value,
+            'total_interest': op.total_interest,
+            'iof_amount': op.iof_amount,
+            'comissao_valor': op.comissao_valor,
+            'monthly_rate': op.monthly_rate,
             'status': op.status,
             'notes': op.notes,
             'cheques': [{
                 'id': c.id,
+                'type': c.type,
                 'due_date': c.due_date.strftime('%Y-%m-%d'),
                 'amount': c.amount,
+                'interest_amount': c.interest_amount,
                 'status': c.status,
                 'bank': c.bank,
                 'number': c.number,
-                'issuer_name': c.issuer_name
+                'issuer_name': c.issuer_name,
+                'payment_date': c.payment_date.strftime('%Y-%m-%d') if c.payment_date else None,
+                'paid_amount': c.paid_amount
             } for c in op.checks]
         }
         
