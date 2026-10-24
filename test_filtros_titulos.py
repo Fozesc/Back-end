@@ -141,7 +141,18 @@ def main():
         r = http.get('/api/checks/?per_page=100000', headers=cab).get_json()
         assert len(r['items']) == 100 and r['total'] == len(ids) + 105, (len(r['items']), r['total'])
 
-        print("OK: datas De/Ate obedecidas ao pe da letra (vencido, Juridico e Devolvido so "
+        # relatorio: TODOS do filtro, sem o limite de 100 da pagina, com o mesmo resumo
+        r = http.get('/api/checks/relatorio', headers=cab).get_json()
+        assert len(r['itens']) == len(ids) + 105 == r['resumo']['qtd'] and not r['cortado'], len(r['itens'])
+        assert r['empresa'] == 'Fozesc Teste' and r['gerado_em']
+        r = http.get(f'/api/checks/relatorio?status={em_aberto}&search=venc', headers=cab).get_json()
+        assert [(i['emitente'], i['situacao']) for i in r['itens']] == [('vencido', 'Atrasado'), ('a_vencer', 'Aguardando')]
+        assert r['itens'][0]['dias_atraso'] == 30 and r['itens'][1]['dias_atraso'] == 0
+        assert r['resumo']['qtd'] == 2
+        r = http.get('/api/checks/relatorio?search=Cliente%20Teste&sort_by=amount&sort_order=desc', headers=cab).get_json()
+        assert len(r['itens']) == len(ids) + 105 and r['itens'][0]['valor'] == 100.0
+
+        print("OK: relatorio com todos os titulos do filtro (sem paginacao). datas De/Ate obedecidas ao pe da letra (vencido, Juridico e Devolvido so "
               "entram se estiverem no periodo), Aguardando sem os vencidos, Atrasado com o "
               "Aguardando vencido, resumo e acao em lote com os mesmos filtros, e no maximo "
               "100 por pagina.")

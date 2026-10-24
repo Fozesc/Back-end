@@ -24,6 +24,16 @@ def index():
                                          date_end, sort_by, sort_order, calculo))
 
 
+@bp.route('/relatorio', methods=['GET'])
+@jwt_required()
+def relatorio():
+    """Todos os titulos do filtro (sem paginacao) para o PDF da tela Titulos."""
+    a = request.args
+    return jsonify(service.relatorio(a.get('search', ''), a.get('status', ''), a.get('date_start'),
+                                     a.get('date_end'), a.get('sort_by', 'due_date'),
+                                     a.get('sort_order', 'asc'), a.get('calculo')))
+
+
 # Filtros que a acao em lote aceita - os MESMOS da listagem. Whitelist de proposito:
 # sem ela, um campo qualquer no JSON entraria direto como parametro da query.
 FILTROS_LOTE = ('search', 'status', 'date_start', 'date_end', 'calculo')

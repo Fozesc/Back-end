@@ -328,6 +328,53 @@ class CheckService:
             'resumo': self._resumo(search, status, date_start, date_end, calculo),
         }
 
+    MAX_RELATORIO = 20000
+
+    def relatorio(self, search=None, status=None, date_start=None, date_end=None,
+                  sort_by='due_date', sort_order='asc', calculo=None):
+        """Todos os titulos do filtro da tela, sem paginacao, para o PDF. So as colunas
+        que o relatorio usa, numa consulta so: a serializacao da lista faz consultas
+        por linha e ficaria lenta com milhares de titulos."""
+        from app.models.domain import CompanySettings
+
+        hoje = date.today()
+        situacao = case((and_(Check.status == 'Aguardando', Check.due_date < hoje), 'Atrasado'),
+                        else_=Check.status)
+        coluna = {'amount': Check.amount, 'issuer_name': Check.issuer_name}.get(sort_by, Check.due_date)
+        linhas = (self._montar_query(search, status, date_start, date_end, calculo)
+                  .with_entities(Check.due_date, Check.original_due_date, Client.name, Check.issuer_name,
+                                 Check.bank, Check.number, Check.type, Check.operation_id,
+                                 Operation.operation_date, Check.amount, situacao, Check.payment_date,
+                                 Check.fora_do_calculo)
+                  .order_by(desc(coluna) if sort_order == 'desc' else asc(coluna), Check.id)
+                  .limit(self.MAX_RELATORIO + 1).all())
+        iso = lambda d: d.strftime('%Y-%m-%d') if d else None
+        itens = [{
+            'vencimento': iso(venc),
+            'vencimento_original': iso(orig) if orig and orig != venc else None,
+            'cliente': cliente or 'Sem Cliente',
+            'emitente': emitente or '',
+            'banco': banco or '',
+            'numero': numero or '',
+            'tipo': tipo,
+            'bordero': op_id,
+            'data_bordero': iso(data_op),
+            'valor': round(float(valor or 0), 2),
+            'situacao': sit,
+            'pagamento': iso(pago_em),
+            'fora_do_calculo': bool(fora),
+            'dias_atraso': (hoje - venc).days if sit != 'Pago' and venc and venc < hoje else 0,
+        } for venc, orig, cliente, emitente, banco, numero, tipo, op_id, data_op, valor, sit, pago_em, fora in linhas]
+        s = CompanySettings.query.first()
+        return {
+            'itens': itens[:self.MAX_RELATORIO],
+            'cortado': len(itens) > self.MAX_RELATORIO,
+            'resumo': self._resumo(search, status, date_start, date_end, calculo),
+            'empresa': (s.company_name if s and s.company_name else 'Fozesc'),
+            'cnpj': s.cnpj if s else None,
+            'gerado_em': datetime.now().strftime('%d/%m/%Y %H:%M'),
+        }
+
     def _resumo(self, search, status, date_start, date_end, calculo):
         """Soma de TODOS os cheques do filtro (nao so da pagina), por status, no banco.
         Aguardando vencido aparece como Atrasado, igual na lista."""
