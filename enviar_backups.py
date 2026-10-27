@@ -207,17 +207,15 @@ def main():
         else:
             problemas.append("A planilha não foi gerada.")
 
-    banco = None
     if "banco" in pedidos:
         sql = mais_recente(pasta, (".sql.gz",)) if os.path.isdir(pasta) else None
         if sql:
             quando = recente(sql, "A cópia do banco")
             if not dump_completo(sql):
                 problemas.append("A cópia do banco está incompleta.")
-            banco = f"{nome.lower()}-banco-{quando:%Y-%m-%d}.sql.gz.enc"
             with open(sql, "rb") as f:
                 anexos.append({
-                    "arquivo": banco, "dados": cifrar(f.read(), senha),
+                    "arquivo": f"{nome.lower()}-banco-{quando:%Y-%m-%d}.sql.gz.enc", "dados": cifrar(f.read(), senha),
                     "tipo": ("application", "octet-stream"), "curto": "cópia do banco",
                     "texto": ["Cópia de segurança do banco de dados",
                               f"   O sistema inteiro em {quando:%d/%m/%Y às %H:%M}. Serve para restaurar o sistema; não precisa abrir."]})
@@ -229,7 +227,6 @@ def main():
         if total + len(anexo["dados"]) > MAX_ANEXO:
             problemas.append(f"{anexo['texto'][0]} ficou de fora: passou do limite de tamanho do Gmail.")
             anexos.remove(anexo)
-            banco = None if anexo["arquivo"] == banco else banco
         else:
             total += len(anexo["dados"])
 
@@ -240,9 +237,6 @@ def main():
         linhas += [*anexo["texto"], ""]
     if anexos:
         linhas.append("Os arquivos abrem com a senha do backup.")
-    if banco:
-        linhas += ["", "Para abrir a cópia do banco no Mac (pede a senha):",
-                   f"  openssl enc -d {' '.join(CIFRA)} -in {banco} -out {banco[:-4]}"]
     linhas += ["", f"Mensagem automática do sistema {nome}."]
 
     conteudo = juntar([a["curto"] for a in anexos]) if anexos else "nenhum arquivo"

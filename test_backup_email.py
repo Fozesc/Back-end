@@ -249,7 +249,7 @@ def main():
         aberto = subprocess.run(['openssl', 'enc', '-d', *e.CIFRA, '-pass', 'pass:senha-do-teste-123'],
                                 input=anexos[banco], capture_output=True, check=True).stdout
         assert gzip.decompress(aberto) == dump, 'a copia do banco abre com a senha e e a mesma'
-        assert f'-in {banco} -out {banco[:-4]}' in msg.get_body().get_content()
+        assert 'openssl' not in msg.get_body().get_content(), 'o comando tecnico nao vai no e-mail'
 
         os.environ.update(BACKUP_EMAIL='socio@x.com', BACKUP_ARQUIVOS='planilha,relatorio', BACKUP_RELATORIO='')
         e.main()
