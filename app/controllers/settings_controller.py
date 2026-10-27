@@ -40,3 +40,17 @@ def update_backup():
         return jsonify({'error': str(e)}), 403
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+
+
+@bp.route('/backup/enviar', methods=['POST'])
+@jwt_required()
+def enviar_backup():
+    negado = _so_admin()
+    if negado:
+        return negado
+    try:
+        return jsonify(service.pedir_envio_backup())
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400

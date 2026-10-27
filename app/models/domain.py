@@ -42,6 +42,7 @@ class BackupConfig(db.Model):
     freq_planilha = db.Column(db.String(10), nullable=False, default='semanal')
     freq_relatorio = db.Column(db.String(10), nullable=False, default='mensal')
     ultimo_envio = db.Column(db.JSON)
+    envio_pedido_em = db.Column(db.DateTime)
 
 # --- USUÁRIOS (AUTH) ---
 class User(db.Model):

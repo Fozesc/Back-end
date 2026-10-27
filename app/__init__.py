@@ -109,6 +109,8 @@ def create_app():
             'ALTER TABLE recorrentes ALTER COLUMN conta DROP NOT NULL',
             'ALTER TABLE recorrentes ADD COLUMN IF NOT EXISTS valor_atual DOUBLE PRECISION',
             'ALTER TABLE recorrentes ADD COLUMN IF NOT EXISTS pago_atual DOUBLE PRECISION NOT NULL DEFAULT 0',
+            # botao 'Enviar agora' da aba Backups: o worker de backup atende o pedido
+            'ALTER TABLE backup_config ADD COLUMN IF NOT EXISTS envio_pedido_em TIMESTAMP',
         ):
             db.session.execute(text(comando))
         # Contas do caixa com um nome so (Dinheiro / BB / Caixa; 'Sistema (X)' no que o sistema

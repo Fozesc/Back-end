@@ -73,6 +73,9 @@ def main():
         assert put(valido, operador).status_code == 403, 'operador nao muda'
         assert http.get('/api/settings/backup').status_code == 401
 
+        enviar = lambda quem=admin: http.post('/api/settings/backup/enviar', headers=quem)
+        assert enviar().status_code == 400, 'sem lista salva nao pede envio'
+
         r = put({**valido, 'senha_login': 'errada'})
         assert r.status_code == 403, r.get_json()
         with app.app_context():
@@ -127,12 +130,19 @@ def main():
         r = put({**valido, 'senha_login': SENHA_OPERADOR}, ex_admin)
         assert r.status_code == 403, 'deixou de ser Admin: o login antigo (que ainda diz Admin) nao muda nada'
 
+        assert enviar(operador).status_code == 403 and enviar(ex_admin).status_code == 403, 'so o Admin pede envio'
+        r = enviar()
+        assert r.status_code == 200 and r.get_json()['envio_pedido_em'], r.get_json()
+        assert enviar().status_code == 200, 'pedir de novo enquanto espera nao duplica'
+        with app.app_context():
+            assert AuditLog.query.filter(AuditLog.description.like('Pediu o envio%')).count() == 1
+
         assert put({**sem_trocar, 'destinatarios': []}).status_code == 200, 'lista vazia desliga o e-mail'
         with app.app_context():
             assert 'retirou' in AuditLog.query.filter_by(target='Backup', action='UPDATE').order_by(AuditLog.id.desc()).first().description
         print('OK: aba Backups - só o Admin vê e muda (conferido também no banco, não só no login), salvar pede a senha de login, e-mails conferidos no backend '
               '(sem vírgula, quebra de linha ou repetido, até 20), a senha dos arquivos nunca volta para a tela nem '
-              'para a auditoria, e a auditoria diz quem entrou, saiu e o que mudou.')
+              'para a auditoria, a auditoria diz quem entrou, saiu e o que mudou, e o botão Enviar agora só vale para o Admin e não duplica.')
     finally:
         if _app is not None:
             with _app.app_context():

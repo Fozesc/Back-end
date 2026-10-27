@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 
 from app.models.domain import BackupConfig, CompanySettings, User
 from app import db
@@ -100,10 +101,27 @@ class SettingsService:
     def get_backup(self):
         return self._serialize_backup(db.session.get(BackupConfig, 1) or BackupConfig(destinatarios=[]))
 
-    def update_backup(self, data):
+    def _exigir_admin(self):
         usuario = db.session.get(User, int(get_jwt_identity()))
-        if usuario and usuario.role != 'Admin':
+        if not usuario or usuario.role != 'Admin':
             raise PermissionError('Só o administrador mexe no backup')
+        return usuario
+
+    def pedir_envio_backup(self):
+        self._exigir_admin()
+        cfg = db.session.get(BackupConfig, 1)
+        if not cfg or not cfg.destinatarios:
+            raise ValueError('Salve a lista de e-mails antes de enviar')
+        if not cfg.envio_pedido_em:
+            cfg.envio_pedido_em = datetime.now()
+            db.session.commit()
+            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Backup',
+                                  'Pediu o envio do backup completo agora para: '
+                                  + ', '.join(d['email'] for d in cfg.destinatarios))
+        return self._serialize_backup(cfg)
+
+    def update_backup(self, data):
+        usuario = self._exigir_admin()
         if not usuario or not check_password_hash(usuario.password_hash, str(data.get('senha_login') or '')):
             self.audit.log_action(self._get_current_user(), 'NEGADO', 'Backup',
                                   'Senha incorreta ao tentar mudar a configuração do backup')
@@ -163,4 +181,5 @@ class SettingsService:
             'tem_senha': bool(c.senha),
             'configurado': c.id is not None,
             'ultimo_envio': c.ultimo_envio,
+            'envio_pedido_em': c.envio_pedido_em.strftime('%Y-%m-%d %H:%M') if c.envio_pedido_em else None,
         }

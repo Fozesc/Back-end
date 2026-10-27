@@ -183,6 +183,23 @@ def main():
         with app.app_context():
             assert db.session.get(BackupConfig, 1).ultimo_envio['ok'] is True
 
+        # ------------------------------------------------ botao "Enviar agora": o worker atende o pedido uma vez
+        feitos = []
+        g.executar_backup = lambda tipo: feitos.append(tipo)
+        chamadas.clear()
+        g.atender_pedido()
+        assert not feitos and not chamadas, 'sem pedido nao faz nada'
+        with app.app_context():
+            db.session.get(BackupConfig, 1).envio_pedido_em = datetime.now()
+            db.session.commit()
+        g.atender_pedido()
+        assert feitos == ['DIARIO'], 'backup novo antes de mandar'
+        assert enviados() == [('lucas@x.com', 'banco,planilha,relatorio'), ('socio@x.com', 'planilha,relatorio')]
+        g.atender_pedido()
+        assert feitos == ['DIARIO'], 'o pedido e atendido uma vez so'
+        with app.app_context():
+            assert db.session.get(BackupConfig, 1).envio_pedido_em is None
+
         # ------------------------------------------------ a mensagem de verdade (sem o Gmail)
         g.subprocess.run = rodar_de_verdade
         import enviar_backups as e

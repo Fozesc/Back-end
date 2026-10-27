@@ -462,6 +462,22 @@ def enviar_copia(hoje=None, arquivos=None):
             json.dump({"data": hoje.isoformat(), "periodo": periodo}, f)
     return todos_ok
 
+def atender_pedido():
+    """Botao 'Enviar agora' da aba Backups: backup novo e os 3 arquivos para a lista."""
+    engine = create_engine(relatorio_backup.url_do_banco())
+    try:
+        with engine.begin() as c:
+            pedido = c.execute(text("UPDATE backup_config SET envio_pedido_em = NULL "
+                                    "WHERE id = 1 AND envio_pedido_em IS NOT NULL RETURNING id")).first()
+    except ProgrammingError:
+        pedido = None
+    finally:
+        engine.dispose()
+    if pedido:
+        print("📨 Pedido de envio pela aba Backups: backup novo e os 3 arquivos.")
+        executar_backup(tipo="DIARIO")
+        enviar_copia(arquivos=ARQUIVOS)
+
 def rotina_12h():
     print("⏰[12:00] Disparando backup diário da tarde...")
     executar_backup(tipo="DIARIO")
@@ -500,4 +516,8 @@ if __name__ == "__main__":
 
     while True:
         schedule.run_pending()
-        time.sleep(60)
+        try:
+            atender_pedido()
+        except Exception as e:
+            print(f"❌ Falha ao atender o pedido de envio: {e}")
+        time.sleep(30)
