@@ -16,7 +16,7 @@ os.environ.setdefault("POSTGRES_DB", "teste")
 from datetime import date, datetime
 
 from enviar_backups import para_apagar
-from gerar_backup import conferir_dump, dia_util, periodo_do_email, tipo_do_email
+from gerar_backup import arquivos_do_dia, conferir_dump, dia_util, grupos, periodo_do_email, tipo_do_email
 
 RODAPE = "--\n-- PostgreSQL database dump complete\n--\n"
 TABELAS = ["clients", "checks", "operations", "transactions", "users",
@@ -78,17 +78,37 @@ def main():
     assert periodo_do_email("semanal", d("2026-10-23"), None) == (d("2026-10-16"), d("2026-10-23")), "o primeiro: 7 dias"
     assert periodo_do_email("semanal", d("2026-10-23"), d("2027-01-01")) == (d("2026-10-16"), d("2026-10-23"))
 
-    # ------------------------------------------------ limpeza: fica o ultimo OK de cada mes
+    # ------------------------------------------------ o que sai em cada dia, pela frequencia de cada arquivo
+    cfg = {"banco": "diario", "planilha": "semanal", "relatorio": "mensal"}
+    assert arquivos_do_dia(cfg, d("2026-10-21")) == {"banco"}, "quarta comum: so o banco"
+    assert arquivos_do_dia(cfg, d("2026-10-23")) == {"banco", "planilha"}, "sexta: banco e planilha"
+    assert arquivos_do_dia(cfg, d("2026-10-30")) == {"banco", "planilha", "relatorio"}, "fim do mes: tudo"
+    assert arquivos_do_dia(cfg, d("2026-09-30")) == {"banco", "planilha", "relatorio"}, "mes fecha na quarta"
+    assert arquivos_do_dia(cfg, d("2026-10-24")) == set(), "sabado: nada"
+    assert arquivos_do_dia({**cfg, "banco": "desligado"}, d("2026-10-21")) == set()
+
+    lista = [{"email": "lucas@x.com", "banco": True}, {"email": "socio@x.com", "banco": False},
+             {"email": "outro@x.com", "banco": False}]
+    assert grupos(lista, {"banco", "planilha", "relatorio"}) == [
+        (["lucas@x.com"], ["banco", "planilha", "relatorio"]),
+        (["socio@x.com", "outro@x.com"], ["planilha", "relatorio"])], "o banco so para quem foi marcado"
+    assert grupos(lista, {"banco"}) == [(["lucas@x.com"], ["banco"])], "so o banco: socio nao recebe e-mail vazio"
+    assert grupos(lista[1:], {"banco"}) == []
+
+    # ------------------------------------------------ limpeza: ficam os do ultimo dia (sem problema) de cada mes
     m = lambda uid, dia, fim: (uid, datetime.fromisoformat(dia + "T15:05"), f"Backup Fozesc {dia} — {fim}")
     caixa = [m(b"1", "2026-10-02", "OK · relatório de 25/09 a 02/10/2026"), m(b"2", "2026-10-23", "PROBLEMA (1)"),
              m(b"3", "2026-10-30", "OK · relatório de outubro/2026"), m(b"4", "2026-11-06", "OK"),
              m(b"5", "2026-11-13", "PROBLEMA (1)"), m(b"6", "2026-11-27", "OK"), m(b"7", "2026-12-04", "OK")]
     assert sorted(para_apagar(caixa, datetime(2026, 12, 15), 30)) == [b"1", b"2", b"5"], \
         "fica o relatorio de outubro (ultimo do mes) e o ultimo OK de novembro; os recentes nem entram"
+    caixa += [m(b"8", "2026-10-30", "Cópia do banco"), m(b"9", "2026-11-11", "ATENÇÃO: Cópia do banco")]
+    assert sorted(para_apagar(caixa, datetime(2026, 12, 15), 30)) == [b"1", b"2", b"5", b"9"], \
+        "os dois e-mails do ultimo dia (o dos socios e o do banco) ficam; ATENÇÃO conta como problema"
 
     print("OK: dump vazio, truncado e incompleto reprovados; dump completo aprovado; e-mail no último dia útil "
-          "do mês e da semana (feriados pela Páscoa), relatório do mês ou desde o último e-mail, e a limpeza guarda "
-          "o último OK de cada mês.")
+          "do mês e da semana (feriados pela Páscoa), cada arquivo na sua frequência, o banco só para quem foi "
+          "marcado, relatório do mês ou desde o último, e a limpeza guarda o último dia de cada mês.")
 
 
 if __name__ == "__main__":

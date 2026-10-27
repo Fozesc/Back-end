@@ -31,6 +31,18 @@ class CompanySettings(db.Model):
     saldo_inicial_ce = db.Column(db.Float, default=0.0)
     saldo_inicial_caixa = db.Column(db.Float, default=0.0)
 
+
+class BackupConfig(db.Model):
+    __tablename__ = 'backup_config'
+
+    id = db.Column(db.Integer, primary_key=True)
+    destinatarios = db.Column(db.JSON, nullable=False, default=list)
+    senha = db.Column(db.String(64))
+    freq_banco = db.Column(db.String(10), nullable=False, default='diario')
+    freq_planilha = db.Column(db.String(10), nullable=False, default='semanal')
+    freq_relatorio = db.Column(db.String(10), nullable=False, default='mensal')
+    ultimo_envio = db.Column(db.JSON)
+
 # --- USUÁRIOS (AUTH) ---
 class User(db.Model):
     __tablename__ = 'users'

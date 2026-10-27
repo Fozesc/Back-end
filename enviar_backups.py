@@ -1,41 +1,34 @@
 #!/usr/bin/env python3
-"""Manda por e-mail, cifrada, uma cópia do backup mais recente de um sistema.
+"""Manda por e-mail, com senha, uma cópia do backup mais recente: a cópia do banco (só para
+quem foi marcado na aba Backups), a planilha com uma aba por assunto e o relatório PDF.
 
-É a cópia fora do servidor: se a máquina estragar, o backup está no Gmail.
-Só usa a biblioteca padrão e o `openssl`. É o mesmo script do Smaug.
+É a cópia fora do servidor: se a máquina estragar, o backup está no Gmail. Começou como o
+script do Smaug; na fozesc quem chama é o gerar_backup.py, depois do backup das 15h, uma vez
+para cada grupo de destinatários, passando o que vai no e-mail pelo ambiente.
 
-Na fozesc roda sozinho no container de backup, logo depois do backup das 15h
-(gerar_backup.py), lendo as variáveis do ambiente (o docker-compose passa as do .env).
-Para testar na hora:
-
-    docker compose exec backup_fozesc python enviar_backups.py
-
-Fora do Docker (como no Smaug, pelo cron), passe o .env do sistema:
+Fora do Docker, passe o .env do sistema:
 
     python3 enviar_backups.py /home/lucas/fozesc/.env
 
-Variáveis no .env (só letras, números e hífen nos valores):
+Variáveis:
 
     BACKUP_NOME=Fozesc
-    BACKUP_PASTA=/home/lucas/fozesc/volumes/backups    (no container: /app/backups)
+    BACKUP_PASTA=/app/backups
     BACKUP_EMAIL=para.quem.vai@gmail.com        (vários: separe por vírgula)
     BACKUP_SMTP_USER=conta.que.envia@gmail.com
     BACKUP_SMTP_PASS=senha de app de 16 letras do Google
-    BACKUP_SENHA=senha da criptografia, anotada também FORA do servidor
+    BACKUP_SENHA=senha dos anexos, anotada também FORA do servidor
     BACKUP_DIAS=30                              (opcional)
+    BACKUP_ARQUIVOS=banco,planilha,relatorio    (opcional; sem ela vão banco e planilha)
+    BACKUP_RELATORIO=caminho do PDF já protegido pela mesma senha
+    BACKUP_RELATORIO_TITULO=Relatório de outubro/2026
+    BACKUP_RELATORIO_PERIODO=01/10/2026 a 30/10/2026
 
-Opcionais, que o gerar_backup.py da fozesc passa:
+Para não lotar a conta que envia, os e-mails do backup com mais de BACKUP_DIAS dias vão para
+a lixeira dela, menos os do último dia de cada mês, que ficam para sempre.
 
-    BACKUP_RELATORIO=caminho de um PDF já protegido por senha, anexado à parte
-    BACKUP_ASSUNTO=o que vai no fim do assunto (ex.: "relatório de outubro/2026")
-
-Para não lotar a conta que envia, os e-mails do backup com mais de BACKUP_DIAS
-dias vão para a lixeira dela, menos o último de cada mês (na fozesc, o do
-relatório do mês), que fica para sempre. Se BACKUP_EMAIL for a mesma conta,
-a limpeza vale para tudo.
-
-Para abrir o anexo no Mac (pede a BACKUP_SENHA):
-    openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -in ARQUIVO.enc | tar xz
+Para abrir a cópia do banco no Mac (pede a BACKUP_SENHA):
+    openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -in ARQUIVO.sql.gz.enc -out ARQUIVO.sql.gz
 """
 
 import email
@@ -47,14 +40,17 @@ import re
 import smtplib
 import subprocess
 import sys
-import tarfile
 import time
 from datetime import datetime, timedelta
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 
+from msoffcrypto.format.ooxml import OOXMLFile
+from openpyxl import load_workbook
+
 MAX_HORAS = 26
-MAX_ANEXO = 20 * 1024 * 1024
+MAX_ANEXO = 18 * 1024 * 1024
+TIPO_XLSX = ("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 CIFRA = ["-aes-256-cbc", "-pbkdf2", "-iter", "200000", "-md", "sha256"]
 
 
@@ -87,35 +83,15 @@ def dump_completo(caminho):
         return False
 
 
-def escolher(pasta, agora):
-    """Devolve os arquivos para mandar e a lista de problemas encontrados."""
-    if not os.path.isdir(pasta):
-        return [], [f"a pasta {pasta} não existe"]
-    arquivos, problemas = [], []
-    sql = mais_recente(pasta, (".sql.gz",))
-    planilha = mais_recente(pasta, (".xlsx", ".zip"))
-    if sql is None:
-        problemas.append("nenhum .sql.gz")
-    else:
-        horas = (agora - os.path.getmtime(sql)) / 3600
-        if horas > MAX_HORAS:
-            problemas.append(f"o último backup tem {horas:.0f} horas — parou de rodar?")
-        if not dump_completo(sql):
-            problemas.append(f"{os.path.basename(sql)} está incompleto")
-        arquivos.append(sql)
-    if planilha is None:
-        problemas.append("nenhuma planilha")
-    else:
-        arquivos.append(planilha)
-    return arquivos, problemas
+def cifrar_planilha(caminho, senha):
+    saida = io.BytesIO()
+    with open(caminho, "rb") as f:
+        OOXMLFile(f).encrypt(senha, saida)
+    return saida.getvalue()
 
 
-def empacotar(arquivos):
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for caminho in arquivos:
-            tar.add(caminho, arcname=os.path.basename(caminho))
-    return buffer.getvalue()
+def juntar(itens):
+    return itens[0] if len(itens) == 1 else ", ".join(itens[:-1]) + " e " + itens[-1]
 
 
 def cifrar(dados, senha):
@@ -129,14 +105,18 @@ def cifrar(dados, senha):
     ).stdout
 
 
+def com_problema(assunto):
+    return "ATENÇÃO" in assunto or "PROBLEMA" in assunto
+
+
 def para_apagar(mensagens, agora, dias):
-    """De [(uid, data, assunto)], os antigos que podem sair: fica o último
-    de cada mês (de preferência um OK) e tudo dos últimos `dias` dias."""
+    """De [(uid, data, assunto)], os antigos que podem sair: ficam os do último dia de cada
+    mês (de preferência um dia sem problema) e tudo dos últimos `dias` dias."""
     antigos = [m for m in mensagens if m[1] < agora - timedelta(days=dias)]
     guardar = {}
-    for m in sorted(antigos, key=lambda m: ("— OK" not in m[2], -m[1].timestamp())):
-        guardar.setdefault((m[1].year, m[1].month), m[0])
-    return [m[0] for m in antigos if m[0] not in guardar.values()]
+    for m in sorted(antigos, key=lambda m: (com_problema(m[2]), -m[1].timestamp())):
+        guardar.setdefault((m[1].year, m[1].month), m[1].date())
+    return [m[0] for m in antigos if guardar[(m[1].year, m[1].month)] != m[1].date()]
 
 
 def limpar_antigos(config, nome, dias):
@@ -178,62 +158,107 @@ def main():
                             "BACKUP_SMTP_PASS", "BACKUP_SENHA") if not config.get(k)]
     if faltando:
         sys.exit(f"Faltam no .env: {', '.join(faltando)}")
-    if len(config["BACKUP_SENHA"]) < 12:
+    senha = config["BACKUP_SENHA"]
+    if len(senha) < 12:
         sys.exit("BACKUP_SENHA curta demais (mínimo 12 caracteres)")
     nome = config["BACKUP_NOME"]
     if not re.fullmatch(r"[\w-]+", nome):
         sys.exit("BACKUP_NOME: use só letras, números e hífen")
     dias = int(config.get("BACKUP_DIAS") or 30)
+    pedidos = [a.strip() for a in (config.get("BACKUP_ARQUIVOS") or "banco,planilha").split(",")]
+    pasta = config["BACKUP_PASTA"]
+    hoje = datetime.now()
+    problemas, anexos = [], []
 
-    arquivos, problemas = escolher(config["BACKUP_PASTA"], time.time())
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    anexo = cifrar(empacotar(arquivos), config["BACKUP_SENHA"]) if arquivos else b""
-    relatorio = config.get("BACKUP_RELATORIO")
-    if relatorio and not os.path.isfile(relatorio):
-        problemas.append("o relatório PDF não foi gerado")
-        relatorio = None
-    if relatorio:
-        anexo_extra = os.path.getsize(relatorio)
-        if len(anexo) + anexo_extra > MAX_ANEXO:
-            problemas.append(f"o relatório ({anexo_extra // 2**20} MB) não coube no e-mail")
-            relatorio = None
-    if len(anexo) > MAX_ANEXO:
-        problemas.append(f"anexo com {len(anexo) // 2**20} MB passa do limite do Gmail: hora de trocar por Google Drive")
-        anexo = b""
+    def recente(caminho, o_que):
+        quando = datetime.fromtimestamp(os.path.getmtime(caminho))
+        if (hoje - quando).total_seconds() / 3600 > MAX_HORAS:
+            problemas.append(f"{o_que} mais recente é de {quando:%d/%m/%Y às %H:%M}: o backup automático pode ter parado.")
+        return quando
 
-    linhas = [f"{os.path.basename(c)} ({os.path.getsize(c) // 1024} KB, "
-              f"{datetime.fromtimestamp(os.path.getmtime(c)):%d/%m %H:%M})" for c in arquivos]
-    if relatorio:
-        linhas.append("")
-        linhas.append(f"Relatório: {os.path.basename(relatorio)} (anexo à parte; abre em qualquer leitor de PDF "
-                      "com a mesma senha da criptografia)")
-    corpo = "\n".join(
-        (["PROBLEMAS:", *problemas, ""] if problemas else [])
-        + ["Arquivos:", *linhas, "", "Para abrir o backup no Mac (pede a senha da criptografia):",
-           f"  openssl enc -d {' '.join(CIFRA)} -in backup-{nome.lower()}-{hoje}.tar.gz.enc | tar xz"]
-    )
+    if "relatorio" in pedidos:
+        caminho = config.get("BACKUP_RELATORIO")
+        if caminho and os.path.isfile(caminho):
+            titulo = config.get("BACKUP_RELATORIO_TITULO") or "Relatório"
+            periodo = config.get("BACKUP_RELATORIO_PERIODO")
+            with open(caminho, "rb") as f:
+                anexos.append({
+                    "arquivo": f"{nome} - {titulo.replace('/', '-')}.pdf", "dados": f.read(),
+                    "tipo": ("application", "pdf"), "curto": titulo[0].lower() + titulo[1:],
+                    "texto": [f"{titulo} (PDF)",
+                              "   Resumo do movimento" + (f" de {periodo}" if periodo else "")
+                              + ": caixa, borderôs, recebimentos, prorrogações, vales e o que está em aberto."]})
+        else:
+            problemas.append("O relatório não foi gerado.")
 
+    if "planilha" in pedidos:
+        planilha = mais_recente(pasta, (".xlsx",)) if os.path.isdir(pasta) else None
+        if planilha:
+            quando = recente(planilha, "A planilha")
+            livro = load_workbook(planilha, read_only=True)
+            abas = livro.sheetnames
+            livro.close()
+            anexos.append({
+                "arquivo": f"{nome} - Planilha {quando:%d-%m-%Y}.xlsx", "dados": cifrar_planilha(planilha, senha),
+                "tipo": TIPO_XLSX, "curto": "planilha",
+                "texto": ["Planilha com todos os dados do sistema (Excel)",
+                          f"   Tudo o que estava no sistema em {quando:%d/%m/%Y às %H:%M}, "
+                          f"uma aba para cada assunto: {juntar(abas)}."]})
+        else:
+            problemas.append("A planilha não foi gerada.")
+
+    banco = None
+    if "banco" in pedidos:
+        sql = mais_recente(pasta, (".sql.gz",)) if os.path.isdir(pasta) else None
+        if sql:
+            quando = recente(sql, "A cópia do banco")
+            if not dump_completo(sql):
+                problemas.append("A cópia do banco está incompleta.")
+            banco = f"{nome.lower()}-banco-{quando:%Y-%m-%d}.sql.gz.enc"
+            with open(sql, "rb") as f:
+                anexos.append({
+                    "arquivo": banco, "dados": cifrar(f.read(), senha),
+                    "tipo": ("application", "octet-stream"), "curto": "cópia do banco",
+                    "texto": ["Cópia de segurança do banco de dados",
+                              f"   O sistema inteiro em {quando:%d/%m/%Y às %H:%M}. Serve para restaurar o sistema; não precisa abrir."]})
+        else:
+            problemas.append("Não encontrei a cópia do banco.")
+
+    total = 0
+    for anexo in list(anexos):
+        if total + len(anexo["dados"]) > MAX_ANEXO:
+            problemas.append(f"{anexo['texto'][0]} ficou de fora: passou do limite de tamanho do Gmail.")
+            anexos.remove(anexo)
+            banco = None if anexo["arquivo"] == banco else banco
+        else:
+            total += len(anexo["dados"])
+
+    linhas = [f"Backup da {nome} de {hoje:%d/%m/%Y}.", ""]
+    if problemas:
+        linhas += ["ATENÇÃO:", *[f"  - {p}" for p in problemas], ""]
+    for anexo in anexos:
+        linhas += [*anexo["texto"], ""]
+    if anexos:
+        linhas.append("Os arquivos abrem com a senha do backup.")
+    if banco:
+        linhas += ["", "Para abrir a cópia do banco no Mac (pede a senha):",
+                   f"  openssl enc -d {' '.join(CIFRA)} -in {banco} -out {banco[:-4]}"]
+    linhas += ["", f"Mensagem automática do sistema {nome}."]
+
+    conteudo = juntar([a["curto"] for a in anexos]) if anexos else "nenhum arquivo"
     msg = EmailMessage()
-    situacao = f"PROBLEMA ({len(problemas)})" if problemas else "OK"
-    extra = f" · {config['BACKUP_ASSUNTO']}" if config.get("BACKUP_ASSUNTO") else ""
-    msg["Subject"] = f"Backup {nome} {datetime.now():%d/%m/%Y} — {situacao}{extra}"
+    msg["Subject"] = f"Backup {nome} {hoje:%d/%m/%Y} — {'ATENÇÃO: ' if problemas else ''}{conteudo[0].upper()}{conteudo[1:]}"
     msg["From"] = config["BACKUP_SMTP_USER"]
     msg["To"] = config["BACKUP_EMAIL"]
-    msg.set_content(corpo)
-    if relatorio:
-        with open(relatorio, "rb") as f:
-            msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=os.path.basename(relatorio))
-    if anexo:
-        msg.add_attachment(anexo, maintype="application", subtype="octet-stream",
-                           filename=f"backup-{nome.lower()}-{hoje}.tar.gz.enc")
+    msg.set_content("\n".join(linhas))
+    for anexo in anexos:
+        msg.add_attachment(anexo["dados"], maintype=anexo["tipo"][0], subtype=anexo["tipo"][1], filename=anexo["arquivo"])
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as smtp:
-        # O Google mostra a senha de app em blocos com espaço; ela vale sem eles.
         smtp.login(config["BACKUP_SMTP_USER"], config["BACKUP_SMTP_PASS"].replace(" ", ""))
         smtp.send_message(msg)
     print(f"{datetime.now():%Y-%m-%d %H:%M} enviado: {msg['Subject']}")
 
-    # Depois do envio: se a limpeza falhar, o backup de hoje já foi.
     try:
         print(f"  {limpar_antigos(config, nome, dias)} e-mail(s) antigo(s) para a lixeira")
     except Exception as erro:  # noqa: BLE001

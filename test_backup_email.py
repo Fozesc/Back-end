@@ -1,9 +1,10 @@
 """
 E-mail do backup: a planilha sai com uma aba por assunto (titulos, clientes, vales...) e sem
-auditoria nem senha de usuario; o relatorio PDF do periodo sai protegido pela senha; e o
-"desde o ultimo e-mail" so anda quando o envio da certo.
+auditoria nem senha de usuario; o relatorio PDF e a planilha saem com a senha; a copia do banco
+so vai para quem foi marcado na aba Backups; cada arquivo sai na sua frequencia; e o "desde o
+ultimo relatorio" so anda quando o envio da certo.
 Banco SEPARADO (fozesc_teste_backup_email), criado e apagado pelo teste. Nao manda e-mail:
-o envio (enviar_backups.py) e' trocado por um falso.
+o Gmail e' trocado por um falso.
 
 Rode:  ./venv/bin/python test_backup_email.py
 """
@@ -47,8 +48,8 @@ def main():
     sql_admin(f'DROP DATABASE IF EXISTS {BANCO_TESTE}', f'CREATE DATABASE {BANCO_TESTE}')
     try:
         from app import create_app, db
-        from app.models.domain import (AuditLog, Check, CheckExtension, Client, ClientNote, CompanySettings,
-                                       Evento, Operation, Recorrente, Transaction, User, Vale)
+        from app.models.domain import (AuditLog, BackupConfig, Check, CheckExtension, Client, ClientNote,
+                                       CompanySettings, Evento, Operation, Recorrente, Transaction, User, Vale)
         from openpyxl import load_workbook
         import gerar_backup as g
         import relatorio_backup
@@ -125,33 +126,123 @@ def main():
         vazio = relatorio_backup.dados(hoje + timedelta(days=30), hoje + timedelta(days=31))
         relatorio_backup.gerar(vazio, os.path.join(pasta, 'vazio.pdf'), 'Relatório')   # periodo sem nada nao quebra
 
-        # ------------------------------------------------ envio (o enviar_backups.py e' falso aqui)
+        # ------------------------------------------------ quem recebe o que (o enviar_backups.py e' falso aqui)
         g.ARQUIVO_ULTIMO_EMAIL = os.path.join(pasta, 'ULTIMO_EMAIL.json')
         g.DIR_RELATORIOS = os.path.join(pasta, 'relatorios')
+        rodar_de_verdade = subprocess.run
         chamadas, resposta = [], {'codigo': 0}
         def envio_falso(cmd, env=None, **kw):
             chamadas.append(env)
             return subprocess.CompletedProcess(cmd, resposta['codigo'], stdout='enviado (teste)', stderr='')
         g.subprocess.run = envio_falso
+        d = date.fromisoformat
 
         os.environ.pop('BACKUP_EMAIL', None)
-        assert g.enviar_copia('semanal', hoje) is False and not chamadas, 'sem BACKUP_EMAIL nao envia'
-        os.environ.update(BACKUP_EMAIL='quem@recebe.com', BACKUP_SENHA='senha-do-teste-123')
-        assert g.enviar_copia('semanal', hoje) is True
-        env = chamadas[-1]
-        assert os.path.isfile(env['BACKUP_RELATORIO']) and b'/Encrypt' in open(env['BACKUP_RELATORIO'], 'rb').read()
-        assert env['BACKUP_ASSUNTO'] == f"relatório de {hoje - timedelta(days=7):%d/%m} a {hoje:%d/%m/%Y}", env['BACKUP_ASSUNTO']
-        assert g.ultimo_envio() == hoje
+        assert g.enviar_copia(d('2026-10-30')) is False and not chamadas, 'sem ninguem na lista nao envia'
 
-        resposta['codigo'] = 1                  # o Gmail recusou: nao conta como enviado
-        assert g.enviar_copia('semanal', hoje + timedelta(days=7)) is False
-        assert g.ultimo_envio() == hoje, 'falhou: o proximo ainda vem desde o ultimo que chegou'
+        os.environ.update(BACKUP_EMAIL='env@recebe.com', BACKUP_SENHA='senha-do-env-12345')
+        assert g.enviar_copia(d('2026-10-30')) is True, 'aba ainda nao salva: vale o .env'
+        env = chamadas[-1]
+        assert (env['BACKUP_EMAIL'], env['BACKUP_ARQUIVOS'], env['BACKUP_SENHA']) == \
+            ('env@recebe.com', 'banco,planilha,relatorio', 'senha-do-env-12345'), env
+        assert (env['BACKUP_RELATORIO_TITULO'], env['BACKUP_RELATORIO_PERIODO']) == \
+            ('Relatório de outubro/2026', '01/10/2026 a 30/10/2026')
+        assert b'/Encrypt' in open(env['BACKUP_RELATORIO'], 'rb').read()
+        assert g.ultimo_envio() == d('2026-10-30')
+
+        with app.app_context():
+            db.session.add(BackupConfig(id=1, senha='senha-da-aba-12345', freq_banco='diario', freq_planilha='semanal',
+                                        freq_relatorio='semanal',
+                                        destinatarios=[{'email': 'lucas@x.com', 'banco': True},
+                                                       {'email': 'socio@x.com', 'banco': False}]))
+            db.session.commit()
+        enviados = lambda: [(c['BACKUP_EMAIL'], c['BACKUP_ARQUIVOS']) for c in chamadas]
+
+        chamadas.clear()
+        assert g.enviar_copia(d('2026-11-04')) is True
+        assert enviados() == [('lucas@x.com', 'banco')], 'quarta: so o banco, so para o Lucas'
+        assert chamadas[0]['BACKUP_SENHA'] == 'senha-da-aba-12345', 'a senha da aba vale mais que a do .env'
+        assert g.ultimo_envio() == d('2026-10-30'), 'sem relatorio o "desde o ultimo" nao anda'
+
+        chamadas.clear()
+        assert g.enviar_copia(d('2026-11-06')) is True
+        assert enviados() == [('lucas@x.com', 'banco,planilha,relatorio'), ('socio@x.com', 'planilha,relatorio')]
+        assert chamadas[1]['BACKUP_RELATORIO_PERIODO'] == '30/10/2026 a 06/11/2026', chamadas[1]['BACKUP_RELATORIO_PERIODO']
+        assert g.ultimo_envio() == d('2026-11-06')
+
+        resposta['codigo'] = 1
+        assert g.enviar_copia(d('2026-11-13')) is False
+        assert g.ultimo_envio() == d('2026-11-06'), 'falhou: o proximo relatorio ainda vem desde o que chegou'
+        with app.app_context():
+            ultimo = db.session.get(BackupConfig, 1).ultimo_envio
+        assert ultimo['ok'] is False and 'FALHOU' in ultimo['texto'] and 'socio@x.com' in ultimo['texto'], ultimo
         resposta['codigo'] = 0
-        g.enviar_copia('semanal', hoje + timedelta(days=14))
-        assert chamadas[-1]['BACKUP_ASSUNTO'].startswith(f"relatório de {hoje:%d/%m} a "), chamadas[-1]['BACKUP_ASSUNTO']
+        chamadas.clear()
+        g.enviar_copia(d('2026-11-19'))
+        assert chamadas[-1]['BACKUP_RELATORIO_PERIODO'] == '06/11/2026 a 19/11/2026', 'sexta 20/11 e feriado: sai na quinta'
+        with app.app_context():
+            assert db.session.get(BackupConfig, 1).ultimo_envio['ok'] is True
+
+        # ------------------------------------------------ a mensagem de verdade (sem o Gmail)
+        g.subprocess.run = rodar_de_verdade
+        import enviar_backups as e
+        import gzip, io, sys, msoffcrypto
+        mensagens = []
+        class GmailFalso:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def login(self, *a): pass
+            def send_message(self, msg): mensagens.append(msg)
+        e.smtplib.SMTP_SSL = GmailFalso
+        e.limpar_antigos = lambda *a: 0
+        dump = b'-- x\n-- PostgreSQL database dump complete\n'
+        with gzip.open(os.path.join(pasta, 'FOZESC_DIARIO.sql.gz'), 'wb') as f:
+            f.write(dump)
+        os.environ.update(BACKUP_NOME='Fozesc', BACKUP_PASTA=pasta, BACKUP_SMTP_USER='envia@x.com',
+                          BACKUP_SMTP_PASS='abcd efgh', BACKUP_SENHA='senha-do-teste-123', BACKUP_RELATORIO=fechado,
+                          BACKUP_RELATORIO_TITULO='Relatório de outubro/2026',
+                          BACKUP_RELATORIO_PERIODO='01/10/2026 a 30/10/2026')
+        sys.argv = ['enviar_backups.py']
+        hoje_br = datetime.now().strftime('%d/%m/%Y')
+
+        os.environ.update(BACKUP_EMAIL='socio@x.com', BACKUP_ARQUIVOS='planilha,relatorio')
+        e.main()
+        msg = mensagens[-1]
+        assert msg['Subject'] == f'Backup Fozesc {hoje_br} — Relatório de outubro/2026 e planilha', msg['Subject']
+        anexos = {a.get_filename(): a.get_payload(decode=True) for a in msg.iter_attachments()}
+        planilha = f"Fozesc - Planilha {datetime.now():%d-%m-%Y}.xlsx"
+        assert sorted(anexos) == sorted(['Fozesc - Relatório de outubro-2026.pdf', planilha]), sorted(anexos)
+        corpo = msg.get_body().get_content()
+        assert 'openssl' not in corpo and 'ATENÇÃO' not in corpo, corpo
+        assert 'Resumo do movimento de 01/10/2026 a 30/10/2026' in corpo and 'Títulos, Clientes, Borderôs' in corpo, corpo
+        cifrada = msoffcrypto.OfficeFile(io.BytesIO(anexos[planilha]))
+        assert cifrada.is_encrypted(), 'a planilha so abre com a senha'
+        cifrada.load_key(password='senha-do-teste-123')
+        aberta = io.BytesIO()
+        cifrada.decrypt(aberta)
+        assert load_workbook(aberta).sheetnames == list(g.ABAS)
+
+        os.environ.update(BACKUP_EMAIL='lucas@x.com', BACKUP_ARQUIVOS='banco,planilha,relatorio')
+        e.main()
+        msg = mensagens[-1]
+        assert msg['Subject'].endswith('Relatório de outubro/2026, planilha e cópia do banco'), msg['Subject']
+        anexos = {a.get_filename(): a.get_payload(decode=True) for a in msg.iter_attachments()}
+        banco = f"fozesc-banco-{datetime.now():%Y-%m-%d}.sql.gz.enc"
+        aberto = subprocess.run(['openssl', 'enc', '-d', *e.CIFRA, '-pass', 'pass:senha-do-teste-123'],
+                                input=anexos[banco], capture_output=True, check=True).stdout
+        assert gzip.decompress(aberto) == dump, 'a copia do banco abre com a senha e e a mesma'
+        assert f'-in {banco} -out {banco[:-4]}' in msg.get_body().get_content()
+
+        os.environ.update(BACKUP_EMAIL='socio@x.com', BACKUP_ARQUIVOS='planilha,relatorio', BACKUP_RELATORIO='')
+        e.main()
+        msg = mensagens[-1]
+        assert msg['Subject'] == f'Backup Fozesc {hoje_br} — ATENÇÃO: Planilha', msg['Subject']
+        assert 'O relatório não foi gerado.' in msg.get_body().get_content()
         print('OK: e-mail do backup - planilha com uma aba por assunto (sem auditoria, sem senha de usuário, sem linha '
-              'informativa), relatório PDF do período com senha AES-256, e "desde o último e-mail" só anda quando o '
-              'envio dá certo.')
+              'informativa), relatório PDF e planilha com senha, cópia do banco só para quem foi marcado, cada arquivo '
+              'na sua frequência, a senha da aba Backups no lugar da do .env, e "desde o último relatório" só anda '
+              'quando ele chega a todos.')
     finally:
         if _app is not None:
             with _app.app_context():

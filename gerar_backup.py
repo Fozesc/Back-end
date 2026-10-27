@@ -10,6 +10,7 @@ import schedule
 from datetime import date, datetime, timedelta
 from dateutil.easter import easter
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import ProgrammingError
 
 import relatorio_backup
 
@@ -307,8 +308,8 @@ def testar_restauracao(caminho=None):
         rodar(f'{base} -d postgres -c "DROP DATABASE IF EXISTS {temp_db}"')
 
 # ---------------------------------------------------------------- e-mail (copia fora do servidor)
-# Sai no ultimo dia util do mes (relatorio do mes inteiro) e, no resto, uma vez por semana no
-# ultimo dia util dela (relatorio desde o ultimo e-mail). Feriados de data fixa: os mesmos do
+# Cada arquivo (banco, planilha, relatorio) sai na frequencia escolhida na aba Backups, sempre
+# depois do backup das 15h e so em dia util. Feriados de data fixa: os mesmos do
 # Front-end/src/utils/diasUteis.js (24 e 31/12 entram: nao tem banco).
 FERIADOS_FIXOS = {"01-01", "04-21", "05-01", "09-07", "10-12", "11-02", "11-15", "11-20", "12-24", "12-25", "12-31"}
 
@@ -344,43 +345,122 @@ def ultimo_envio():
         return None
 
 def periodo_do_email(tipo, hoje, ultimo):
-    """Mensal: o mes inteiro. Semanal: desde o dia do ultimo e-mail (ele entra de novo, para o
-    que aconteceu depois das 15h daquele dia nao ficar de fora); no primeiro, 7 dias."""
+    """No ultimo dia util do mes: o mes inteiro. Nos outros: desde o dia do ultimo relatorio (ele
+    entra de novo, para o que aconteceu depois das 15h daquele dia nao ficar de fora); no primeiro, 7 dias."""
     if tipo == "mensal":
         return hoje.replace(day=1), hoje
     return (ultimo if ultimo and ultimo <= hoje else hoje - timedelta(days=7)), hoje
 
-def enviar_copia(tipo, hoje=None):
-    """Manda o e-mail: o backup cifrado (.sql + planilha) e o relatorio PDF do periodo, os dois
-    com a BACKUP_SENHA. So conta como enviado (e o 'desde o ultimo e-mail' anda) se der certo."""
-    if not os.getenv("BACKUP_EMAIL"):
-        print("📭 Cópia por e-mail desligada (sem BACKUP_EMAIL no .env do servidor).")
-        return False
+ARQUIVOS = ("banco", "planilha", "relatorio")
+FREQ_PADRAO = {"banco": "diario", "planilha": "semanal", "relatorio": "mensal"}
+
+def ler_config():
+    """A aba Backups das Configuracoes. Enquanto ela nao for salva, vale o .env do servidor."""
+    engine = create_engine(relatorio_backup.url_do_banco())
+    try:
+        with engine.connect() as c:
+            linha = c.execute(text("SELECT destinatarios, senha, freq_banco, freq_planilha, freq_relatorio "
+                                   "FROM backup_config WHERE id = 1")).mappings().first()
+    except ProgrammingError:
+        linha = None
+    finally:
+        engine.dispose()
+    if linha is None:
+        emails = [e.strip() for e in os.getenv("BACKUP_EMAIL", "").split(",") if e.strip()]
+        return {"destinatarios": [{"email": e, "banco": True} for e in emails],
+                "senha": os.getenv("BACKUP_SENHA"), **FREQ_PADRAO}
+    return {"destinatarios": linha["destinatarios"] or [], "senha": linha["senha"] or os.getenv("BACKUP_SENHA"),
+            "banco": linha["freq_banco"], "planilha": linha["freq_planilha"], "relatorio": linha["freq_relatorio"]}
+
+def arquivos_do_dia(cfg, hoje):
+    """'semanal' sai no ultimo dia util da semana e tambem no do mes; 'mensal', so no do mes."""
+    if not dia_util(hoje):
+        return set()
+    tipo = tipo_do_email(hoje)
+    vale = {"diario": True, "semanal": tipo is not None, "mensal": tipo == "mensal"}
+    return {a for a in ARQUIVOS if vale.get(cfg[a], False)}
+
+def grupos(destinatarios, arquivos):
+    """Quem recebe o banco num e-mail, quem nao recebe em outro. Grupo sem arquivo nao recebe nada."""
+    saida = []
+    for com_banco in (True, False):
+        emails = [d["email"] for d in destinatarios if bool(d.get("banco")) == com_banco]
+        lista = [a for a in ARQUIVOS if a in arquivos and (com_banco or a != "banco")]
+        if emails and lista:
+            saida.append((emails, lista))
+    return saida
+
+def gravar_ultimo_envio(ok, texto):
+    engine = create_engine(relatorio_backup.url_do_banco())
+    try:
+        with engine.begin() as c:
+            c.execute(text("UPDATE backup_config SET ultimo_envio = :j WHERE id = 1"),
+                      {"j": json.dumps({"quando": datetime.now().strftime("%Y-%m-%d %H:%M"), "ok": ok, "texto": texto},
+                                       ensure_ascii=False)})
+    except Exception as e:
+        print(f"Aviso: não gravei o resultado do envio no sistema: {e}")
+    finally:
+        engine.dispose()
+
+def enviar_copia(hoje=None, arquivos=None):
+    """Manda os arquivos do dia (ou `arquivos`, para testar): o banco so para quem foi marcado,
+    a planilha e o relatorio PDF para todos, tudo com a senha do backup. O 'desde o ultimo
+    relatorio' so anda se o relatorio chegou a todos."""
     hoje = hoje or date.today()
-    inicio, fim = periodo_do_email(tipo, hoje, ultimo_envio())
-    titulo = relatorio_backup.titulo_do_periodo(inicio, fim)
-    os.makedirs(DIR_RELATORIOS, exist_ok=True)
-    pdf = os.path.join(DIR_RELATORIOS, f"relatorio-fozesc-{inicio}-a-{fim}.pdf")
     try:
-        relatorio_backup.gerar(relatorio_backup.dados(inicio, fim), pdf, titulo, os.getenv("BACKUP_SENHA"))
-        print(f"📄 Relatório gerado: {os.path.basename(pdf)}")
+        cfg = ler_config()
     except Exception as e:
-        print(f"❌ O relatório PDF falhou (o backup vai assim mesmo): {e}")
-        if os.path.exists(pdf):
-            os.remove(pdf)
-    ambiente = {**os.environ, "BACKUP_RELATORIO": pdf, "BACKUP_ASSUNTO": titulo[0].lower() + titulo[1:]}
-    try:
-        r = subprocess.run([sys.executable, os.path.join(BASE_DIR, "enviar_backups.py")],
-                           env=ambiente, capture_output=True, text=True, timeout=600)
-    except Exception as e:
-        print(f"❌ Falha ao mandar a cópia por e-mail: {e}")
+        print(f"❌ Não consegui ler a configuração do backup: {e}")
         return False
-    print(f"📧 {(r.stdout + r.stderr).strip() or f'enviar_backups saiu com o código {r.returncode}'}")
-    if r.returncode != 0:
+    if not cfg["destinatarios"]:
+        print("📭 Cópia por e-mail desligada (ninguém na lista da aba Backups nem BACKUP_EMAIL no .env).")
         return False
-    with open(ARQUIVO_ULTIMO_EMAIL, "w") as f:
-        json.dump({"data": hoje.isoformat(), "tipo": tipo, "periodo": [inicio.isoformat(), fim.isoformat()]}, f)
-    return True
+    arquivos = arquivos_do_dia(cfg, hoje) if arquivos is None else set(arquivos)
+    envios = grupos(cfg["destinatarios"], arquivos)
+    if not envios:
+        print("📭 Hoje não sai e-mail (pela frequência de cada arquivo na aba Backups).")
+        return False
+
+    pdf = titulo = periodo = None
+    if "relatorio" in arquivos:
+        inicio, fim = periodo_do_email(tipo_do_email(hoje), hoje, ultimo_envio())
+        titulo = relatorio_backup.titulo_do_periodo(inicio, fim)
+        periodo = f"{inicio:%d/%m/%Y} a {fim:%d/%m/%Y}"
+        os.makedirs(DIR_RELATORIOS, exist_ok=True)
+        pdf = os.path.join(DIR_RELATORIOS, f"relatorio-fozesc-{inicio}-a-{fim}.pdf")
+        try:
+            relatorio_backup.gerar(relatorio_backup.dados(inicio, fim), pdf, titulo, cfg["senha"])
+            print(f"📄 Relatório gerado: {os.path.basename(pdf)}")
+        except Exception as e:
+            print(f"❌ O relatório PDF falhou (o resto vai assim mesmo): {e}")
+            if os.path.exists(pdf):
+                os.remove(pdf)
+            pdf = None
+
+    resultados = []
+    for emails, lista in envios:
+        ambiente = {**os.environ, "BACKUP_EMAIL": ",".join(emails), "BACKUP_SENHA": cfg["senha"] or "",
+                    "BACKUP_ARQUIVOS": ",".join(lista), "BACKUP_RELATORIO": pdf or "",
+                    "BACKUP_RELATORIO_TITULO": titulo or "", "BACKUP_RELATORIO_PERIODO": periodo or ""}
+        try:
+            r = subprocess.run([sys.executable, os.path.join(BASE_DIR, "enviar_backups.py")],
+                               env=ambiente, capture_output=True, text=True, timeout=600)
+            ok, saida = r.returncode == 0, (r.stdout + r.stderr).strip() or f"saiu com o código {r.returncode}"
+        except Exception as e:
+            ok, saida = False, str(e)
+        print(f"📧 {', '.join(emails)}: {saida}")
+        resultados.append((emails, lista, ok, saida))
+
+    nomes = {"banco": "banco", "planilha": "planilha", "relatorio": "relatório"}
+    texto = "; ".join(f"{' e '.join(nomes[a] for a in lista)} para {', '.join(emails)}"
+                      + ("" if ok else f" FALHOU: {saida.splitlines()[-1][:200]}")
+                      for emails, lista, ok, saida in resultados)
+    todos_ok = all(ok for *_, ok, _ in resultados)
+    gravar_ultimo_envio(todos_ok, texto)
+    if pdf and all(ok for _, lista, ok, _ in resultados if "relatorio" in lista):
+        with open(ARQUIVO_ULTIMO_EMAIL, "w") as f:
+            json.dump({"data": hoje.isoformat(), "periodo": periodo}, f)
+    return todos_ok
 
 def rotina_12h():
     print("⏰[12:00] Disparando backup diário da tarde...")
@@ -397,12 +477,7 @@ def rotina_15h():
         executar_backup(tipo="SEMANAL")
     else:
         executar_backup(tipo="DIARIO")
-    # depois do backup das 15h: e-mail no ultimo dia util da semana e no do mes
-    tipo = tipo_do_email(date.today())
-    if tipo:
-        enviar_copia(tipo)
-    else:
-        print("📭 Hoje não é dia de e-mail (sai no último dia útil da semana e no do mês).")
+    enviar_copia()
 
 if __name__ == "__main__":
     comando = sys.argv[1] if len(sys.argv) > 1 else None
@@ -411,8 +486,7 @@ if __name__ == "__main__":
         sys.exit(0 if testar_restauracao() else 1)
 
     if comando == "--email":
-        # manda agora (para testar): relatorio desde o ultimo e-mail, ou do mes se hoje for o dia
-        sys.exit(0 if enviar_copia(tipo_do_email(date.today()) or "semanal") else 1)
+        sys.exit(0 if enviar_copia(arquivos=ARQUIVOS) else 1)
 
     if comando == "--agora":
         executar_backup(tipo="DIARIO")

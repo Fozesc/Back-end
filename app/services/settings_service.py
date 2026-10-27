@@ -1,7 +1,17 @@
-from app.models.domain import CompanySettings
+import re
+
+from app.models.domain import BackupConfig, CompanySettings, User
 from app import db
 from app.services.audit_service import AuditService
-from flask_jwt_extended import get_jwt
+from flask_jwt_extended import get_jwt, get_jwt_identity
+from werkzeug.security import check_password_hash
+
+FREQUENCIAS = {'diario': 'todo dia útil', 'semanal': 'toda semana', 'mensal': 'todo mês', 'desligado': 'não envia'}
+ARQUIVOS = {'freq_banco': 'banco', 'freq_planilha': 'planilha', 'freq_relatorio': 'relatório'}
+EMAIL = re.compile(r'[^@\s,;<>"]+@[^@\s,;<>"]+\.[^@\s,;<>".]+')
+MAX_DESTINATARIOS = 20
+
+
 class SettingsService:
 
     def __init__(self):
@@ -85,4 +95,72 @@ class SettingsService:
             'iof_daily_rate': s.iof_daily_rate,
             'extension_rate': s.extension_rate,
             'fine_rate': s.fine_rate
+        }
+
+    def get_backup(self):
+        return self._serialize_backup(db.session.get(BackupConfig, 1) or BackupConfig(destinatarios=[]))
+
+    def update_backup(self, data):
+        usuario = db.session.get(User, int(get_jwt_identity()))
+        if usuario and usuario.role != 'Admin':
+            raise PermissionError('Só o administrador mexe no backup')
+        if not usuario or not check_password_hash(usuario.password_hash, str(data.get('senha_login') or '')):
+            self.audit.log_action(self._get_current_user(), 'NEGADO', 'Backup',
+                                  'Senha incorreta ao tentar mudar a configuração do backup')
+            raise PermissionError('Senha incorreta - nada foi alterado')
+
+        lista = data.get('destinatarios')
+        if not isinstance(lista, list) or len(lista) > MAX_DESTINATARIOS:
+            raise ValueError(f'Informe até {MAX_DESTINATARIOS} e-mails')
+        destinatarios = []
+        for d in lista:
+            email = str(d.get('email') or '').strip().lower() if isinstance(d, dict) else ''
+            if len(email) > 120 or not EMAIL.fullmatch(email):
+                raise ValueError(f'E-mail inválido: {email or "(vazio)"}')
+            if any(x['email'] == email for x in destinatarios):
+                raise ValueError(f'E-mail repetido: {email}')
+            destinatarios.append({'email': email, 'banco': d.get('banco') is True})
+
+        if any(data.get(campo) not in FREQUENCIAS for campo in ARQUIVOS):
+            raise ValueError('Frequência inválida')
+
+        nova = data.get('senha_arquivos') or ''
+        if not isinstance(nova, str) or (nova and not (12 <= len(nova) <= 64 and nova.isprintable())):
+            raise ValueError('A senha dos arquivos precisa ter de 12 a 64 caracteres')
+
+        cfg = db.session.get(BackupConfig, 1)
+        if not cfg:
+            cfg = BackupConfig(id=1, destinatarios=[], freq_banco='diario', freq_planilha='semanal',
+                               freq_relatorio='mensal')
+            db.session.add(cfg)
+        antes = {d['email']: d['banco'] for d in (cfg.destinatarios or [])}
+        depois = {d['email']: d['banco'] for d in destinatarios}
+
+        mudancas = [f"incluiu {e}" + (' (com o banco)' if b else '') for e, b in depois.items() if e not in antes]
+        mudancas += [f"retirou {e}" for e in antes if e not in depois]
+        mudancas += [f"{e} {'passou a receber' if b else 'deixou de receber'} o banco"
+                     for e, b in depois.items() if e in antes and antes[e] != b]
+        for campo, nome in ARQUIVOS.items():
+            if getattr(cfg, campo) != data[campo]:
+                mudancas.append(f"{nome}: {FREQUENCIAS.get(getattr(cfg, campo), getattr(cfg, campo))} -> {FREQUENCIAS[data[campo]]}")
+                setattr(cfg, campo, data[campo])
+        if nova and nova != cfg.senha:
+            mudancas.append('trocou a senha dos arquivos')
+            cfg.senha = nova
+        cfg.destinatarios = destinatarios
+        db.session.commit()
+
+        if mudancas:
+            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Backup', 'Backup: ' + ' | '.join(mudancas))
+        return self._serialize_backup(cfg)
+
+    def _serialize_backup(self, c):
+        return {
+            'destinatarios': c.destinatarios or [],
+            'freq_banco': c.freq_banco or 'diario',
+            'freq_planilha': c.freq_planilha or 'semanal',
+            'freq_relatorio': c.freq_relatorio or 'mensal',
+            'tem_senha': bool(c.senha),
+            'configurado': c.id is not None,
+            'ultimo_envio': c.ultimo_envio,
         }
