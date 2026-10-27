@@ -26,6 +26,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN mkdir -p /app/backups
 
-EXPOSE 5000
+EXPOSE 5001
 
-CMD ["python", "run.py"]
+# Servidor de producao (gunicorn), nao o de desenvolvimento do Flask (`python run.py`, que
+# so serve para rodar na maquina). 8 threads atendem o escritorio todo ao mesmo tempo.
+# ponytail: 1 processo so - o limite de pedidos (Flask-Limiter) guarda a contagem na memoria
+# e as rotinas do boot (create_app) rodam uma vez. Mais processos pede Redis no limiter.
+CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--workers", "1", "--threads", "8", "--timeout", "120", "--access-logfile", "-", "run:app"]

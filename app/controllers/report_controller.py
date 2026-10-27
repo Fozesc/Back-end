@@ -53,3 +53,13 @@ def caixa():
             request.args.get('page', 1, type=int), request.args.get('per_page', 100, type=int)))
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+
+
+@bp.route('/extrato', methods=['GET'])
+@jwt_required()
+def extrato():
+    """Extrato geral do periodo (PDF para os socios): caixa, borderos, recebimentos, vales..."""
+    try:
+        return jsonify(service.extrato_periodo(request.args.get('inicio'), request.args.get('fim')))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400

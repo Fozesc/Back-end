@@ -13,6 +13,8 @@ def register_blueprints(app):
     from .history_controller import bp as history_bp
     from .vale_controller import bp as vale_bp
     from .calendario_controller import bp as calendario_bp
+    from .folha_controller import bp as folha_bp
+    from .recorrente_controller import bp as recorrente_bp
 
     # --- CORREÇÃO: ADICIONANDO OS PREFIXOS ---
     # Sem isso, o frontend chama /api/x e o backend não sabe onde está.
@@ -33,3 +35,5 @@ def register_blueprints(app):
     app.register_blueprint(history_bp, url_prefix='/api/history')
     app.register_blueprint(vale_bp, url_prefix='/api/vales')
     app.register_blueprint(calendario_bp, url_prefix='/api/calendario')
+    app.register_blueprint(folha_bp, url_prefix='/api/folhas')
+    app.register_blueprint(recorrente_bp, url_prefix='/api/recorrentes')

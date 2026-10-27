@@ -37,6 +37,10 @@ def check_if_token_revoked(jwt_header, jwt_payload):
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+    # Atras do nginx todo pedido chega com o IP do nginx: sem isto o limite de pedidos valia
+    # para o escritorio inteiro somado. O nginx manda o IP de verdade no X-Forwarded-For.
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 
 
@@ -97,6 +101,14 @@ def create_app():
             # comissao sai do caixa no dia, junto com a saida do borderô / prorrogacao
             'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS grupo_id INTEGER',
             'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS valor_informativo DOUBLE PRECISION',
+            # lancamento feito por uma despesa recorrente
+            'ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recorrente_id INTEGER '
+            'REFERENCES recorrentes(id) ON DELETE SET NULL',
+            'CREATE INDEX IF NOT EXISTS ix_transactions_recorrente_id ON transactions (recorrente_id)',
+            # recorrente: a conta passou a ser so do debito automatico; pagamento parcial
+            'ALTER TABLE recorrentes ALTER COLUMN conta DROP NOT NULL',
+            'ALTER TABLE recorrentes ADD COLUMN IF NOT EXISTS valor_atual DOUBLE PRECISION',
+            'ALTER TABLE recorrentes ADD COLUMN IF NOT EXISTS pago_atual DOUBLE PRECISION NOT NULL DEFAULT 0',
         ):
             db.session.execute(text(comando))
         # Contas do caixa com um nome so (Dinheiro / BB / Caixa; 'Sistema (X)' no que o sistema

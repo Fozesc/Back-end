@@ -136,6 +136,44 @@ def main():
         ate_hoje = rel(inicio='2020-01-01', fim=date.today().isoformat())
         assert ate_hoje['resumo']['saldo_final'] == round(tudo['resumo']['saldo_final'] - 5, 2), ate_hoje['resumo']
 
+        # ---------------------------------- extrato do periodo (PDF para os socios)
+        from datetime import datetime
+        from app.models.domain import Client, Operation, Check, CheckExtension, Vale
+        with app.app_context():
+            cli = Client(name='Maria')
+            db.session.add(cli)
+            db.session.flush()
+            op = Operation(client_id=cli.id, operation_date=date(2026, 9, 2), total_face_value=1000,
+                           total_interest=40, iof_amount=4, comissao_valor=10, total_net_value=956)
+            antiga = Operation(client_id=cli.id, operation_date=date(2026, 9, 3))     # so historico
+            db.session.add_all([op, antiga])
+            db.session.flush()
+            pago = Check(operation_id=op.id, number='9', issuer_name='Joao', amount=600, due_date=date(2026, 9, 5),
+                         status='Pago', payment_date=date(2026, 9, 5), paid_amount=600)
+            aberto = Check(operation_id=op.id, number='10', issuer_name='Ana', amount=400, due_date=date(2026, 9, 20))
+            db.session.add_all([pago, aberto, Check(operation_id=antiga.id, amount=1, due_date=date(2026, 9, 9),
+                                                    fora_do_calculo=True)])
+            db.session.flush()
+            Transaction.query.filter_by(description='Recebimento Cheque #9').update({'check_id': pago.id})
+            db.session.add(CheckExtension(check_id=aberto.id, prorrogation_date=datetime(2026, 9, 8, 15),
+                                          old_due_date=date(2026, 9, 8), new_due_date=date(2026, 9, 20),
+                                          days_added=12, fee_amount=80))
+            db.session.add(Vale(descricao='Joao', valor=50, data=date(2026, 9, 6), conta='BB'))
+            db.session.commit()
+            op_id = op.id
+        r = http.get('/api/reports/extrato', headers=cab, query_string=setembro)
+        assert r.status_code == 200, r.data
+        x = r.get_json()
+        assert x['caixa']['resumo'] == g['resumo'] and len(x['caixa']['linhas']) == 6, 'o caixa e o do relatorio do caixa'
+        assert [(b['id'], b['titulos'], b['liquido']) for b in x['borderos']] == [(op_id, 2, 956)], x['borderos']
+        assert [(i['cliente'], i['valor']) for i in x['recebimentos']] == [('Maria', 200)], x['recebimentos']
+        assert x['quitados'] == {'qtd': 1, 'valor': 600}
+        assert [(p['emitente'], p['juros'], p['data']) for p in x['prorrogacoes']] == [('Ana', 80, '2026-09-08')]
+        assert [(v['emitente'], v['situacao']) for v in x['vencidos']] == [('Ana', 'Atrasado')], x['vencidos']
+        assert [v['valor'] for v in x['vales']['saidos']] == [50] and x['vales']['em_aberto'] == 50
+        assert x['carteira'] == {'Atrasado': {'qtd': 1, 'valor': 400}}, x['carteira']
+        assert http.get('/api/reports/extrato', headers=cab, query_string={'inicio': 'x'}).status_code == 400
+
         print("OK: relatorio do caixa geral e por conta (saldo anterior, entradas, saidas, saldo final), "
               "categorias, extrato com saldo linha a linha (tambem filtrando so entradas/saidas), "
               "linha informativa fora, paginacao com teto, validacoes, ate a data escolhida ou tudo, "

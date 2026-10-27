@@ -1,9 +1,9 @@
 import pandas as pd
 from app import db
-from app.models.domain import Check, Operation, Client, Transaction, CompanySettings
+from app.models.domain import Check, Operation, Client, Transaction, CompanySettings, CheckExtension, Vale
 from app.services.history_service import bank_key, NOME_CONTA
 from sqlalchemy import func, case, or_, and_, not_
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import os
 
 # Relatorio gerencial da tela (impressao/PDF). Antes a tela imprimia numeros FIXOS
@@ -42,6 +42,8 @@ FILTRO_CONTA = {
 CONTA_DO_FILTRO = {'bb': 'BRASIL', 'caixa': 'CAIXA', 'dinheiro': 'DINHEIRO'}
 NOME_CURTO = {'BRASIL': 'BB', 'CAIXA': 'Caixa', 'DINHEIRO': 'Dinheiro'}
 MAX_EXTRATO_POR_PAGINA = 1000
+# extrato do periodo (PDF para os socios): acima disso o papel nao serve, divida o periodo
+MAX_EXTRATO_PERIODO = 20000
 # so o que mexe no saldo: linha informativa (total do borderô, juros que ficam) fica de fora
 _REAL = Transaction.valor_informativo.is_(None)
 _COM_SINAL = case((Transaction.type == 'entrada', func.abs(Transaction.amount)), else_=-func.abs(Transaction.amount))
@@ -550,6 +552,111 @@ class ReportService:
                 'pages': (total + per_page - 1) // per_page,
                 'per_page': per_page,
             },
+        }
+
+    def extrato_periodo(self, inicio, fim):
+        """Extrato geral do periodo para os socios: o caixa (por conta, por categoria e linha a
+        linha) e o que aconteceu nele - borderos feitos, titulos recebidos, prorrogacoes, vales
+        e o que venceu sem pagar - mais a carteira de hoje. Os numeros do caixa saem do
+        relatorio_caixa, entao batem com o Relatorio do Caixa e o Historico Mensal."""
+        d1, d2 = self._periodo(inicio, fim)
+        caixa = self.relatorio_caixa(inicio, fim, 'todas', 'todos', 1, MAX_EXTRATO_POR_PAGINA)
+        linhas = caixa['extrato']['items']
+        paginas = min(caixa['extrato']['pages'], MAX_EXTRATO_PERIODO // MAX_EXTRATO_POR_PAGINA)
+        for p in range(2, paginas + 1):
+            linhas += self.relatorio_caixa(inicio, fim, 'todas', 'todos', p, MAX_EXTRATO_POR_PAGINA)['extrato']['items']
+        hoje = date.today()
+        r2 = lambda v: round(float(v or 0), 2)
+
+        # borderos com algum titulo que conta (o historico da planilha antiga fica de fora,
+        # como no Historico Mensal)
+        conta = db.session.query(Check.id).filter(Check.operation_id == Operation.id,
+                                                  Check.fora_do_calculo.is_(False)).exists()
+        qtd_titulos = db.session.query(func.count(Check.id)).filter(
+            Check.operation_id == Operation.id).correlate(Operation).scalar_subquery()
+        borderos = [{
+            'id': op.id, 'data': op.operation_date.isoformat(), 'cliente': nome or op.client_name_snapshot,
+            'titulos': qtd, 'face': r2(op.total_face_value), 'juros': r2(op.total_interest),
+            'iof': r2(op.iof_amount), 'comissao': r2(op.comissao_valor), 'liquido': r2(op.total_net_value),
+        } for op, nome, qtd in db.session.query(Operation, Client.name, qtd_titulos)
+            .outerjoin(Client, Client.id == Operation.client_id)
+            .filter(Operation.operation_date >= d1, Operation.operation_date <= d2, conta)
+            .order_by(Operation.operation_date, Operation.id)]
+
+        # dinheiro que entrou de titulo (recebimento, parcial, juros de prorrogacao, multa):
+        # as linhas do caixa ligadas a um cheque (desconto de comissao no vale vai em Vales)
+        recebimentos = [{
+            'data': t.date.isoformat(), 'cliente': nome, 'emitente': c.issuer_name, 'numero': c.number,
+            'descricao': t.description, 'categoria': t.category or 'Sem categoria', 'conta': t.origin,
+            'valor': r2(abs(t.amount)),
+        } for t, c, nome in db.session.query(Transaction, Check, Client.name)
+            .join(Check, Check.id == Transaction.check_id)
+            .join(Operation, Operation.id == Check.operation_id)
+            .outerjoin(Client, Client.id == Operation.client_id)
+            .filter(Transaction.type == 'entrada', _REAL, Transaction.vale_id.is_(None),
+                    Transaction.date >= d1, Transaction.date <= d2)
+            .order_by(Transaction.date, Transaction.id)]
+
+        quitados = db.session.query(func.count(Check.id), func.sum(Check.paid_amount)).filter(
+            Check.status == 'Pago', Check.payment_date >= d1, Check.payment_date <= d2,
+            Check.fora_do_calculo.is_(False)).one()
+
+        prorrogacoes = [{
+            'data': e.prorrogation_date.date().isoformat(), 'cliente': nome, 'emitente': c.issuer_name,
+            'numero': c.number, 'de': e.old_due_date.isoformat(), 'para': e.new_due_date.isoformat(),
+            'dias': e.days_added, 'juros': r2(e.fee_amount),
+        } for e, c, nome in db.session.query(CheckExtension, Check, Client.name)
+            .join(Check, Check.id == CheckExtension.check_id)
+            .join(Operation, Operation.id == Check.operation_id)
+            .outerjoin(Client, Client.id == Operation.client_id)
+            .filter(func.date(CheckExtension.prorrogation_date) >= d1,
+                    func.date(CheckExtension.prorrogation_date) <= d2)
+            .order_by(CheckExtension.prorrogation_date, CheckExtension.id)]
+
+        # so o que ja venceu de fato: o que vence hoje ainda pode ser pago hoje
+        vencidos = [{
+            'vencimento': c.due_date.isoformat(), 'cliente': nome, 'emitente': c.issuer_name,
+            'numero': c.number, 'valor': r2(c.amount),
+            'situacao': 'Atrasado' if c.status == 'Aguardando' and c.due_date < hoje else c.status,
+        } for c, nome in db.session.query(Check, Client.name)
+            .join(Operation, Operation.id == Check.operation_id)
+            .outerjoin(Client, Client.id == Operation.client_id)
+            .filter(Check.due_date >= d1, Check.due_date <= d2, Check.due_date < hoje, Check.status != 'Pago',
+                    Check.fora_do_calculo.is_(False))
+            .order_by(Check.due_date, Check.id)]
+
+        texto_vale = lambda v: ' - '.join(x for x in (v.pessoa, v.descricao) if x)
+        vales_saidos = [{'data': v.data.isoformat(), 'descricao': texto_vale(v), 'conta': v.conta,
+                         'valor': r2(v.valor), 'status': v.status}
+                        for v in Vale.query.filter(Vale.data >= d1, Vale.data <= d2).order_by(Vale.data, Vale.id)]
+        vales_pagos = [{'data': t.date.isoformat(), 'descricao': t.description, 'conta': t.origin,
+                        'valor': r2(t.amount)}
+                       for t in Transaction.query.filter(Transaction.vale_id.isnot(None), Transaction.type == 'entrada',
+                                                         Transaction.date >= d1, Transaction.date <= d2)
+                       .order_by(Transaction.date, Transaction.id)]
+        vale_aberto = db.session.query(func.coalesce(func.sum(Vale.valor), 0.0)).filter(Vale.status == 'Aberto').scalar()
+        vale_ja_pago = db.session.query(func.coalesce(func.sum(Transaction.amount), 0.0)).join(
+            Vale, Transaction.vale_id == Vale.id).filter(Vale.status == 'Aberto', Transaction.type == 'entrada').scalar()
+
+        # carteira de hoje (nao da para voltar no tempo: status e saldo do titulo mudam)
+        situacao = case((and_(Check.status == 'Aguardando', Check.due_date < hoje), 'Atrasado'), else_=Check.status)
+        carteira = {st: {'qtd': qtd, 'valor': r2(v)} for st, qtd, v in db.session.query(
+            situacao, func.count(Check.id), func.sum(Check.amount))
+            .filter(Check.status != 'Pago', Check.fora_do_calculo.is_(False)).group_by(situacao)}
+
+        return {
+            'empresa': caixa['empresa'], 'cnpj': caixa['cnpj'], 'gerado_em': caixa['gerado_em'],
+            'inicio': d1.isoformat(), 'fim': d2.isoformat(),
+            'caixa': {'resumo': caixa['resumo'], 'por_conta': caixa['por_conta'], 'categorias': caixa['categorias'],
+                      'linhas': linhas, 'total': caixa['extrato']['total'],
+                      'cortado': caixa['extrato']['total'] > len(linhas)},
+            'borderos': borderos,
+            'recebimentos': recebimentos,
+            'quitados': {'qtd': quitados[0] or 0, 'valor': r2(quitados[1])},
+            'prorrogacoes': prorrogacoes,
+            'vencidos': vencidos,
+            'vales': {'saidos': vales_saidos, 'pagos': vales_pagos, 'em_aberto': r2(vale_aberto - vale_ja_pago)},
+            'carteira': carteira,
         }
 
     def gerar_relatorio_customizado(self, tipo, start_date=None, end_date=None):

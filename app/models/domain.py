@@ -182,6 +182,8 @@ class Transaction(db.Model):
     valor_informativo = db.Column(db.Float, nullable=True)
     # Pagamento (total ou parcial) de um vale. A soma destas entradas e' o quanto ja foi pago.
     vale_id = db.Column(db.Integer, db.ForeignKey('vales.id', ondelete='SET NULL'), nullable=True, index=True)
+    # Lancamento feito por uma despesa recorrente (debito automatico ou lancado a mao).
+    recorrente_id = db.Column(db.Integer, db.ForeignKey('recorrentes.id', ondelete='SET NULL'), nullable=True, index=True)
 
 
 def conta_padrao(origem):
@@ -281,3 +283,49 @@ class Vale(db.Model):
     data_pagamento = db.Column(db.Date)
     conta_pagamento = db.Column(db.String(20))
     created_at = db.Column(db.DateTime, default=datetime.now)
+
+
+# --- FOLHA DE CALCULO ---
+# Conta solta de cada usuario (uma por linha, resultado ao lado), igual a do Smaug. O
+# texto e' calculado na tela; aqui so fica guardado.
+class Folha(db.Model):
+    __tablename__ = 'folhas'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    titulo = db.Column(db.String(100), nullable=False)
+    conteudo = db.Column(db.Text, nullable=False, default='')
+    criado_em = db.Column(db.DateTime, nullable=False, default=datetime.now)
+
+    def to_dict(self):
+        return {'id': self.id, 'titulo': self.titulo, 'conteudo': self.conteudo}
+
+
+# --- DESPESA RECORRENTE ---
+# Conta que se repete (aluguel, luz, internet). `automatico` = debito automatico: lanca
+# sozinha no caixa no vencimento, da `conta` do cadastro. Manual: fica aguardando alguem
+# lancar, e a conta (uma ou varias, com a forma) e' escolhida na hora, como no Receber.
+# `adiado_ate`, `valor_atual` e `pago_atual` valem so para a ocorrencia atual.
+class Recorrente(db.Model):
+    __tablename__ = 'recorrentes'
+    id = db.Column(db.Integer, primary_key=True)
+    descricao = db.Column(db.String(200), nullable=False)
+    valor = db.Column(db.Float, nullable=False)
+    tipo = db.Column(db.String(10), nullable=False, default='saida')
+    conta = db.Column(db.String(20))  # so o debito automatico usa
+    categoria = db.Column(db.String(50), nullable=False, default='Despesas fixas')
+    frequencia = db.Column(db.String(10), nullable=False, default='mensal')
+    proximo = db.Column(db.Date, nullable=False)
+    # dia escolhido no cadastro: o do dia 31 cai no 28 em fevereiro e volta ao 31 em marco
+    dia = db.Column(db.SmallInteger, nullable=False)
+    adiado_ate = db.Column(db.Date)
+    # pagamento parcial: o valor da conta deste periodo e quanto ja foi pago dele
+    valor_atual = db.Column(db.Float)
+    pago_atual = db.Column(db.Float, nullable=False, default=0.0, server_default=db.text('0'))
+    automatico = db.Column(db.Boolean, nullable=False, default=True)
+    ativo = db.Column(db.Boolean, nullable=False, default=True)
+    obs = db.Column(db.Text)
+    criado_em = db.Column(db.DateTime, nullable=False, default=datetime.now)
+
+    @property
+    def vencimento(self):
+        return self.adiado_ate or self.proximo

@@ -7,8 +7,11 @@ import gzip
 import calendar
 import pandas as pd
 import schedule
-from datetime import datetime, timedelta
-from sqlalchemy import create_engine
+from datetime import date, datetime, timedelta
+from dateutil.easter import easter
+from sqlalchemy import create_engine, text
+
+import relatorio_backup
 
 DB_USER = os.getenv("POSTGRES_USER")
 DB_PASS = os.getenv("POSTGRES_PASSWORD")
@@ -25,6 +28,8 @@ DIR_SEMANAL = os.path.join(BASE_DIR, "backups/semanal")
 DIR_MENSAL = os.path.join(BASE_DIR, "backups/mensal")
 
 ARQUIVO_STATUS = os.path.join(BASE_DIR, "backups", "STATUS.json")
+DIR_RELATORIOS = os.path.join(BASE_DIR, "backups/relatorios")
+ARQUIVO_ULTIMO_EMAIL = os.path.join(BASE_DIR, "backups", "ULTIMO_EMAIL.json")
 MIN_TABELAS = 5
 
 def garantir_pastas():
@@ -61,22 +66,105 @@ def gravar_status(ok, mensagem, arquivo=None):
             "arquivo": os.path.basename(arquivo) if arquivo else None,
         }, f, ensure_ascii=False, indent=2)
 
+# Planilha do backup: uma aba por assunto, com o nome das colunas em portugues, para abrir no
+# Excel sem restaurar o banco. De fora de proposito: usuarios (tem a senha), auditoria e tokens.
+SITUACAO = "CASE WHEN c.status = 'Aguardando' AND c.due_date < CURRENT_DATE THEN 'Atrasado' ELSE c.status END"
+ABAS = {
+    "Títulos": f"""
+        SELECT c.due_date AS "Vencimento", c.original_due_date AS "Vencimento original", cl.name AS "Cliente",
+               c.issuer_name AS "Emitente", c.bank AS "Banco", c.number AS "Número", c.type AS "Tipo",
+               COALESCE(c.original_amount, c.amount) AS "Valor de face", c.amount AS "Valor hoje",
+               c.interest_amount AS "Juros", c.net_amount AS "Líquido", {SITUACAO} AS "Situação",
+               c.payment_date AS "Pago em", c.paid_amount AS "Valor pago", c.payment_method AS "Forma de pagamento",
+               o.id AS "Borderô", o.operation_date AS "Data do borderô",
+               CASE WHEN c.fora_do_calculo THEN 'sim' ELSE '' END AS "Fora do cálculo", c.id AS "Id"
+        FROM checks c JOIN operations o ON o.id = c.operation_id LEFT JOIN clients cl ON cl.id = o.client_id
+        ORDER BY c.due_date, c.id""",
+    "Clientes": """
+        SELECT cl.name AS "Nome", cl.document AS "Documento", cl.phone AS "Telefone", cl.email AS "E-mail",
+               cl.address AS "Endereço", cl.neighborhood AS "Bairro", cl.city AS "Cidade", cl.state AS "UF",
+               cl.zip_code AS "CEP", cl.credit_limit AS "Limite", cl.standard_rate AS "Taxa (%)",
+               COALESCE(ab.valor, 0) AS "Em aberto", COALESCE(ab.qtd, 0) AS "Títulos em aberto",
+               cl.notes AS "Observação", cl.created_at AS "Cadastrado em", cl.id AS "Id"
+        FROM clients cl LEFT JOIN (
+            SELECT o.client_id, SUM(c.amount) AS valor, COUNT(*) AS qtd FROM checks c
+            JOIN operations o ON o.id = c.operation_id
+            WHERE c.status <> 'Pago' AND NOT c.fora_do_calculo GROUP BY o.client_id) ab ON ab.client_id = cl.id
+        ORDER BY cl.name""",
+    "Borderôs": """
+        SELECT o.id AS "Borderô", o.operation_date AS "Data", COALESCE(cl.name, o.client_name_snapshot) AS "Cliente",
+               (SELECT COUNT(*) FROM checks c WHERE c.operation_id = o.id) AS "Títulos",
+               o.total_face_value AS "Valor de face", o.total_interest AS "Juros", o.iof_amount AS "IOF",
+               o.comissao_valor AS "Comissão", o.total_net_value AS "Pago ao cliente", o.monthly_rate AS "Taxa (%)",
+               o.account_source AS "Conta", o.status AS "Situação", o.notes AS "Observação"
+        FROM operations o LEFT JOIN clients cl ON cl.id = o.client_id
+        ORDER BY o.operation_date, o.id""",
+    "Caixa": """
+        SELECT t.date AS "Data", t.description AS "Descrição", t.category AS "Categoria", t.origin AS "Conta",
+               CASE WHEN t.type = 'entrada' THEN ABS(t.amount) END AS "Entrada",
+               CASE WHEN t.type <> 'entrada' THEN ABS(t.amount) END AS "Saída",
+               t.operation_id AS "Borderô", t.check_id AS "Título (id)", t.vale_id AS "Vale", t.id AS "Id"
+        FROM transactions t WHERE t.valor_informativo IS NULL
+        ORDER BY t.date, t.id""",
+    "Vales": """
+        SELECT v.data AS "Data", CONCAT_WS(' - ', v.pessoa, v.descricao) AS "Descrição", v.conta AS "Saiu de",
+               v.valor AS "Valor", CASE WHEN v.status = 'Pago' THEN v.valor ELSE COALESCE(p.pago, 0) END AS "Pago",
+               CASE WHEN v.status = 'Pago' THEN 0 ELSE GREATEST(v.valor - COALESCE(p.pago, 0), 0) END AS "Falta pagar",
+               v.status AS "Situação", v.data_pagamento AS "Quitado em", v.conta_pagamento AS "Conta da quitação",
+               v.id AS "Vale"
+        FROM vales v LEFT JOIN (SELECT vale_id, SUM(amount) AS pago FROM transactions
+                                WHERE vale_id IS NOT NULL AND type = 'entrada' GROUP BY vale_id) p ON p.vale_id = v.id
+        ORDER BY v.data, v.id""",
+    "Prorrogações": """
+        SELECT e.prorrogation_date AS "Data", cl.name AS "Cliente", c.issuer_name AS "Emitente", c.number AS "Número",
+               e.old_due_date AS "Vencia", e.new_due_date AS "Novo vencimento", e.days_added AS "Dias",
+               e.fee_amount AS "Juros", e.status AS "Situação", e.notes AS "Observação"
+        FROM check_extensions e JOIN checks c ON c.id = e.check_id JOIN operations o ON o.id = c.operation_id
+        LEFT JOIN clients cl ON cl.id = o.client_id
+        ORDER BY e.prorrogation_date, e.id""",
+    "Despesas recorrentes": """
+        SELECT r.descricao AS "Descrição", CASE WHEN r.tipo = 'entrada' THEN 'Entrada' ELSE 'Saída' END AS "Tipo",
+               r.valor AS "Valor", r.conta AS "Conta", r.categoria AS "Categoria", r.frequencia AS "Repete",
+               COALESCE(r.adiado_ate, r.proximo) AS "Próximo vencimento",
+               CASE WHEN r.automatico THEN 'Débito automático' ELSE 'Manual' END AS "Modo",
+               CASE WHEN r.ativo THEN 'Ativa' ELSE 'Pausada' END AS "Situação", r.obs AS "Anotação"
+        FROM recorrentes r ORDER BY COALESCE(r.adiado_ate, r.proximo), r.id""",
+    "Calendário": """
+        SELECT ev.data AS "Data", ev.titulo AS "Título", ev.tipo AS "Tipo", cl.name AS "Cliente", ev.valor AS "Valor",
+               ev.previsao AS "Previsão", CASE WHEN ev.concluido THEN 'sim' ELSE '' END AS "Concluído",
+               ev.descricao AS "Descrição", ev.autor AS "Autor"
+        FROM eventos ev LEFT JOIN clients cl ON cl.id = ev.client_id
+        ORDER BY ev.data, ev.id""",
+    "Anotações de clientes": """
+        SELECT n.criado_em AS "Data", cl.name AS "Cliente", n.autor AS "Autor", n.texto AS "Anotação"
+        FROM client_notes n JOIN clients cl ON cl.id = n.client_id
+        ORDER BY n.criado_em, n.id""",
+}
+
 def exportar_para_xlsx(caminho_pasta, prefixo):
-    """ Conecta no banco e gera uma planilha com as tabelas principais """
+    """Planilha com uma aba por assunto (ABAS). Aba que falha (tabela que ainda nao existe)
+    fica de fora; as outras saem."""
     try:
-        engine = create_engine(f'postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}')
+        engine = create_engine(relatorio_backup.url_do_banco())
         xlsx_file = os.path.join(caminho_pasta, f"{prefixo}.xlsx")
-        
-        with pd.ExcelWriter(xlsx_file, engine='xlsxwriter') as writer:
-            tabelas = ['transactions', 'checks', 'clients'] 
-            for tabela in tabelas:
+        with pd.ExcelWriter(xlsx_file, engine='xlsxwriter', date_format='dd/mm/yyyy',
+                            datetime_format='dd/mm/yyyy hh:mm') as writer:
+            dinheiro = writer.book.add_format({'num_format': '#,##0.00'})
+            for aba, sql in ABAS.items():
                 try:
-                    df = pd.read_sql_table(tabela, engine)
-                    # CORREÇÃO 1: O comando correto do Pandas é to_excel, não to_sheet
-                    df.to_excel(writer, sheet_name=tabela[:31], index=False)
+                    df = pd.read_sql(text(sql), engine)
                 except Exception as e:
-                    print(f"Aviso ao ler tabela {tabela}: {e}")
+                    print(f"Aviso: a aba {aba} ficou de fora: {e}")
                     continue
+                df.to_excel(writer, sheet_name=aba, index=False)
+                folha = writer.sheets[aba]
+                folha.freeze_panes(1, 0)
+                folha.autofilter(0, 0, len(df), max(len(df.columns) - 1, 0))
+                for i, coluna in enumerate(df.columns):
+                    largura = max([len(str(coluna))] + [len(str(v)) for v in df[coluna].head(500)])
+                    folha.set_column(i, i, min(max(largura + 2, 10), 50),
+                                     dinheiro if df[coluna].dtype.kind == 'f' else None)
+        engine.dispose()
         print(f"📊 Planilha gerada com sucesso: {os.path.basename(xlsx_file)}")
     except Exception as e:
         print(f"❌ Erro ao gerar XLSX: {e}")
@@ -218,6 +306,82 @@ def testar_restauracao(caminho=None):
     finally:
         rodar(f'{base} -d postgres -c "DROP DATABASE IF EXISTS {temp_db}"')
 
+# ---------------------------------------------------------------- e-mail (copia fora do servidor)
+# Sai no ultimo dia util do mes (relatorio do mes inteiro) e, no resto, uma vez por semana no
+# ultimo dia util dela (relatorio desde o ultimo e-mail). Feriados de data fixa: os mesmos do
+# Front-end/src/utils/diasUteis.js (24 e 31/12 entram: nao tem banco).
+FERIADOS_FIXOS = {"01-01", "04-21", "05-01", "09-07", "10-12", "11-02", "11-15", "11-20", "12-24", "12-25", "12-31"}
+
+def dia_util(d):
+    if d.weekday() >= 5 or d.strftime("%m-%d") in FERIADOS_FIXOS:
+        return False
+    p = easter(d.year)  # Carnaval (segunda e terca), Sexta-feira Santa e Corpus Christi
+    return d not in {p - timedelta(days=48), p - timedelta(days=47), p - timedelta(days=2), p + timedelta(days=60)}
+
+def ultimo_dia_util(desde, ate):
+    """O ultimo dia util entre `desde` e `ate` (`desde` se nenhum outro for)."""
+    while ate > desde and not dia_util(ate):
+        ate -= timedelta(days=1)
+    return ate
+
+def tipo_do_email(hoje):
+    """'mensal' no ultimo dia util do mes, 'semanal' no ultimo dia util da semana (a sexta,
+    ou antes se ela for feriado); nos outros dias, None."""
+    if not dia_util(hoje):
+        return None
+    fim_do_mes = date(hoje.year, hoje.month, calendar.monthrange(hoje.year, hoje.month)[1])
+    if ultimo_dia_util(hoje, fim_do_mes) == hoje:
+        return "mensal"
+    if ultimo_dia_util(hoje, hoje + timedelta(days=4 - hoje.weekday())) == hoje:
+        return "semanal"
+    return None
+
+def ultimo_envio():
+    try:
+        with open(ARQUIVO_ULTIMO_EMAIL) as f:
+            return date.fromisoformat(json.load(f)["data"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+def periodo_do_email(tipo, hoje, ultimo):
+    """Mensal: o mes inteiro. Semanal: desde o dia do ultimo e-mail (ele entra de novo, para o
+    que aconteceu depois das 15h daquele dia nao ficar de fora); no primeiro, 7 dias."""
+    if tipo == "mensal":
+        return hoje.replace(day=1), hoje
+    return (ultimo if ultimo and ultimo <= hoje else hoje - timedelta(days=7)), hoje
+
+def enviar_copia(tipo, hoje=None):
+    """Manda o e-mail: o backup cifrado (.sql + planilha) e o relatorio PDF do periodo, os dois
+    com a BACKUP_SENHA. So conta como enviado (e o 'desde o ultimo e-mail' anda) se der certo."""
+    if not os.getenv("BACKUP_EMAIL"):
+        print("📭 Cópia por e-mail desligada (sem BACKUP_EMAIL no .env do servidor).")
+        return False
+    hoje = hoje or date.today()
+    inicio, fim = periodo_do_email(tipo, hoje, ultimo_envio())
+    titulo = relatorio_backup.titulo_do_periodo(inicio, fim)
+    os.makedirs(DIR_RELATORIOS, exist_ok=True)
+    pdf = os.path.join(DIR_RELATORIOS, f"relatorio-fozesc-{inicio}-a-{fim}.pdf")
+    try:
+        relatorio_backup.gerar(relatorio_backup.dados(inicio, fim), pdf, titulo, os.getenv("BACKUP_SENHA"))
+        print(f"📄 Relatório gerado: {os.path.basename(pdf)}")
+    except Exception as e:
+        print(f"❌ O relatório PDF falhou (o backup vai assim mesmo): {e}")
+        if os.path.exists(pdf):
+            os.remove(pdf)
+    ambiente = {**os.environ, "BACKUP_RELATORIO": pdf, "BACKUP_ASSUNTO": titulo[0].lower() + titulo[1:]}
+    try:
+        r = subprocess.run([sys.executable, os.path.join(BASE_DIR, "enviar_backups.py")],
+                           env=ambiente, capture_output=True, text=True, timeout=600)
+    except Exception as e:
+        print(f"❌ Falha ao mandar a cópia por e-mail: {e}")
+        return False
+    print(f"📧 {(r.stdout + r.stderr).strip() or f'enviar_backups saiu com o código {r.returncode}'}")
+    if r.returncode != 0:
+        return False
+    with open(ARQUIVO_ULTIMO_EMAIL, "w") as f:
+        json.dump({"data": hoje.isoformat(), "tipo": tipo, "periodo": [inicio.isoformat(), fim.isoformat()]}, f)
+    return True
+
 def rotina_12h():
     print("⏰[12:00] Disparando backup diário da tarde...")
     executar_backup(tipo="DIARIO")
@@ -233,12 +397,22 @@ def rotina_15h():
         executar_backup(tipo="SEMANAL")
     else:
         executar_backup(tipo="DIARIO")
+    # depois do backup das 15h: e-mail no ultimo dia util da semana e no do mes
+    tipo = tipo_do_email(date.today())
+    if tipo:
+        enviar_copia(tipo)
+    else:
+        print("📭 Hoje não é dia de e-mail (sai no último dia útil da semana e no do mês).")
 
 if __name__ == "__main__":
     comando = sys.argv[1] if len(sys.argv) > 1 else None
 
     if comando == "--testar":
         sys.exit(0 if testar_restauracao() else 1)
+
+    if comando == "--email":
+        # manda agora (para testar): relatorio desde o ultimo e-mail, ou do mes se hoje for o dia
+        sys.exit(0 if enviar_copia(tipo_do_email(date.today()) or "semanal") else 1)
 
     if comando == "--agora":
         executar_backup(tipo="DIARIO")
