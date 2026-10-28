@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from app.services.history_service import HistoryService
 from flask_jwt_extended import jwt_required
 
@@ -19,4 +19,12 @@ def month_detail(year, month):
     """Detalhe de um mês: saldo por banco, crescimento/perda e lançamentos."""
     if month < 1 or month > 12:
         return jsonify({'error': 'Mês inválido'}), 400
-    return jsonify(service.compute_month_detail(year, month))
+    return jsonify(service.compute_month_detail(year, month, request.args.get('page', 1, type=int),
+                                                request.args.get('per_page', 50, type=int)))
+
+
+@bp.route('/lucro', methods=['GET'])
+@jwt_required()
+def lucro():
+    """Lucro bruto de todos os meses (grafico do Historico Mensal)."""
+    return jsonify(service.lucro_historico())

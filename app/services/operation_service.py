@@ -6,7 +6,11 @@ from app.models.domain import Operation, Check, Transaction, Client, CompanySett
 from flask_jwt_extended import get_jwt
 from app.services.audit_service import AuditService
 from sqlalchemy import asc, desc
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
+
+MAX_POR_PAGINA = 100
+BORDEROS_POR_PAGINA = 10      # ficha do cliente
+MAX_BORDEROS_POR_PAGINA = 50
 
 # Conta do borderô: a MESMA da tela (Front-end/src/utils/calculoBordero.js, calcularLinha).
 # Antes o servidor recalculava cada cheque com outra formula (liquido = valor / fator) e
@@ -322,7 +326,7 @@ class OperationService:
         paginacao = Operation.query\
             .options(joinedload(Operation.checks))\
             .order_by(ordem)\
-            .paginate(page=page, per_page=per_page, error_out=False)
+            .paginate(page=page, per_page=per_page, max_per_page=MAX_POR_PAGINA, error_out=False)
 
         return {
             'items': paginacao.items,
@@ -331,15 +335,16 @@ class OperationService:
             'current_page': page,
         }
 
-    def get_by_client(self, client_id):
-    
-        ops = Operation.query\
+    def get_by_client(self, client_id, page=1, per_page=BORDEROS_POR_PAGINA):
+        """Borderôs do cliente em paginas (mais novo primeiro). Antes trazia todos de uma vez, com
+        todos os titulos: cliente antigo com centenas de borderôs deixava a ficha pesada."""
+        pagina = Operation.query\
             .filter(Operation.client_id == client_id)\
-            .options(joinedload(Operation.checks))\
-            .order_by(desc(Operation.operation_date))\
-            .all()
-            
-        return [self._serialize_with_checks(op) for op in ops]
+            .options(selectinload(Operation.checks))\
+            .order_by(desc(Operation.operation_date), desc(Operation.id))\
+            .paginate(page=page, per_page=per_page, max_per_page=MAX_BORDEROS_POR_PAGINA, error_out=False)
+        return {'items': [self._serialize_with_checks(op) for op in pagina.items],
+                'total': pagina.total, 'pages': pagina.pages, 'page': pagina.page, 'per_page': pagina.per_page}
 
     def _serialize_with_checks(self, op):
         return {

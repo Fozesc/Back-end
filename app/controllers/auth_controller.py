@@ -4,15 +4,21 @@ from app.services.audit_service import AuditService
 from app.schemas.user_schema import user_schema
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt
 from app.models.domain import TokenBlocklist 
-from app import db 
+from app import db, limiter
+
+# por IP (o nginx manda o IP real) e so conta a senha ERRADA: ninguem fica testando senha a
+# vontade, e o escritorio entrando normal nunca esbarra
+LIMITE_LOGIN = '10 per minute;30 per hour'
 
 bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 service = AuthService()
 audit_service = AuditService()
 
 @bp.route('/login', methods=['POST'])
+@limiter.limit(LIMITE_LOGIN, deduct_when=lambda resposta: resposta.status_code == 401,
+               error_message='Muitas tentativas de login. Espere alguns minutos e tente de novo.')
 def login():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     email = data.get('email')
     password = data.get('password')
 
@@ -41,6 +47,12 @@ def login():
             'token': access_token 
         })
     else:
+        audit_service.log_action(
+            user_name='Desconhecido',
+            action='NEGADO',
+            target='Login',
+            description=f'Tentativa de login com senha errada ou usuário inexistente: {str(email)[:100]}'
+        )
         return jsonify({'error': 'Credenciais inválidas'}), 401
     
 @bp.route('/logout', methods=['POST'])

@@ -20,11 +20,15 @@ def index():
 def show(id):
     client = service.get_by_id(id)
     if not client: return jsonify({'error': 'Cliente não encontrado'}), 404
+    stats = service.estatisticas([client.id])[client.id]
     return jsonify({
         'id': client.id, 'name': client.name, 'document': client.document,
         'phone': client.phone, 'credit_limit': client.credit_limit,
         'standard_rate': client.standard_rate, 'notes': client.notes,
-        'address': client.address
+        'email': client.email, 'address': client.address, 'neighborhood': client.neighborhood,
+        'city': client.city, 'state': client.state, 'zip_code': client.zip_code,
+        'reputacao': stats['reputacao'], 'valor_em_aberto': stats['total_debt'],
+        'valor_devolvido': stats['devolvido'], 'cheques_totais': stats['total_count'],
     })
 
 @bp.route('', methods=['POST'])

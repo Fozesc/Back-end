@@ -2,7 +2,14 @@ import calendar
 from datetime import date
 from app import db
 from app.models.domain import Transaction, Operation, Check
-from sqlalchemy import func, case, extract
+from sqlalchemy import func, case, extract, and_
+
+LANCAMENTOS_POR_PAGINA = 50
+MAX_LANCAMENTOS_POR_PAGINA = 100
+# o que entra em 'Multas e Juros' no caixa, separado pelo comeco da descricao que o sistema grava
+EXTRAS = (('prorrogacao', 'Juros de prorrogação%'), ('imposto', 'Imposto%'), ('multa', 'Multa%'))
+LUCRO_VAZIO = {'juros_borderos': 0.0, 'qtd_borderos': 0, 'prorrogacao': 0.0, 'imposto': 0.0, 'multa': 0.0,
+               'outros': 0.0, 'comissoes': 0.0, 'iof': 0.0, 'lucro_bruto': 0.0}
 
 MESES_PT = [
     "", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -47,6 +54,81 @@ class HistoryService:
 
     def _bank_key(self, origin):
         return bank_key(origin)
+
+    # ------------------------------------------------------------------ #
+    # Lucro bruto por mes
+    # ------------------------------------------------------------------ #
+    def lucro_por_mes(self, inicio=None, fim=None):
+        """Lucro bruto de cada mes ('AAAA-MM'), somado no banco (3 consultas para qualquer periodo):
+
+          juros dos borderos feitos no mes (desagio, cheque por cheque, sem os fora do calculo)
+        + juros de prorrogacao, imposto do Receber e multa de devolucao que entraram no caixa
+          no mes (categoria 'Multas e Juros')
+        - comissoes que sairam do caixa no mes (categoria 'Comissão': borderô e prorrogacao)
+
+        IOF nao entra: e' do governo, so aparece como informacao."""
+        meses = {}
+
+        def mes(chave):
+            return meses.setdefault(chave, dict(LUCRO_VAZIO))
+
+        chave_op = func.to_char(Operation.operation_date, 'YYYY-MM')
+        q = db.session.query(chave_op, func.coalesce(func.sum(Check.interest_amount), 0.0),
+                             func.count(func.distinct(Operation.id)))\
+            .join(Operation, Check.operation_id == Operation.id).filter(Check.fora_do_calculo.is_(False))
+        if inicio:
+            q = q.filter(Operation.operation_date >= inicio)
+        if fim:
+            q = q.filter(Operation.operation_date <= fim)
+        for chave, juros, qtd in q.group_by(chave_op):
+            mes(chave).update(juros_borderos=float(juros or 0), qtd_borderos=int(qtd or 0))
+
+        ops_com_cheque = db.session.query(Check.operation_id).filter(Check.fora_do_calculo.is_(False)).distinct()
+        q = db.session.query(chave_op, func.coalesce(func.sum(Operation.iof_amount), 0.0))\
+            .filter(Operation.id.in_(ops_com_cheque))
+        if inicio:
+            q = q.filter(Operation.operation_date >= inicio)
+        if fim:
+            q = q.filter(Operation.operation_date <= fim)
+        for chave, iof in q.group_by(chave_op):
+            mes(chave)['iof'] = float(iof or 0)
+
+        chave_tx = func.to_char(Transaction.date, 'YYYY-MM')
+        tipo = case(*[(Transaction.description.like(padrao), nome) for nome, padrao in EXTRAS], else_='outros')
+        tipo = case((Transaction.category == 'Comissão', 'comissoes'), else_=tipo)
+        q = db.session.query(chave_tx, tipo, func.coalesce(func.sum(func.abs(Transaction.amount)), 0.0))\
+            .filter(db.or_(and_(Transaction.category == 'Multas e Juros', Transaction.type == 'entrada'),
+                           and_(Transaction.category == 'Comissão', Transaction.type != 'entrada')))
+        if inicio:
+            q = q.filter(Transaction.date >= inicio)
+        if fim:
+            q = q.filter(Transaction.date <= fim)
+        for chave, nome, valor in q.group_by(chave_tx, tipo):
+            mes(chave)[nome] += float(valor or 0)
+
+        for m in meses.values():
+            for campo in m:
+                if campo != 'qtd_borderos':
+                    m[campo] = round(m[campo], 2)
+            m['lucro_bruto'] = round(m['juros_borderos'] + m['prorrogacao'] + m['imposto'] + m['multa']
+                                     + m['outros'] - m['comissoes'], 2)
+        return meses
+
+    def lucro_historico(self):
+        """Todos os meses, do primeiro ao ultimo com movimento (mes sem nada aparece com zero,
+        para o grafico nao pular meses)."""
+        meses = self.lucro_por_mes()
+        if not meses:
+            return []
+        ano, mes = map(int, min(meses).split('-'))
+        ultimo = max(meses)
+        saida = []
+        while f"{ano:04d}-{mes:02d}" <= ultimo:
+            chave = f"{ano:04d}-{mes:02d}"
+            saida.append({'year': ano, 'month': mes, 'label': self._label(ano, mes),
+                          **meses.get(chave, LUCRO_VAZIO)})
+            ano, mes = (ano + 1, 1) if mes == 12 else (ano, mes + 1)
+        return saida
 
     # ------------------------------------------------------------------ #
     # Resumo do mês (usado na lista de meses e no detalhe)
@@ -116,11 +198,12 @@ class HistoryService:
     # ------------------------------------------------------------------ #
     # Detalhe do mês: saldo por banco + crescimento/perda + lançamentos
     # ------------------------------------------------------------------ #
-    def compute_month_detail(self, year, month):
+    def compute_month_detail(self, year, month, page=1, per_page=LANCAMENTOS_POR_PAGINA):
         year, month = int(year), int(month)
         start, end = self._month_bounds(year, month)
 
         resumo = self.compute_summary(year, month)
+        lucro = self.lucro_por_mes(start, end).get(f"{year:04d}-{month:02d}", LUCRO_VAZIO)
 
         # Saldo por banco acumulado até o fim do mês (espelha get_balances, com data <= fim)
         acc_rows = db.session.query(
@@ -164,9 +247,11 @@ class HistoryService:
 
         # Lançamentos do mês (o extrato)
         # linha so informativa (total do borderô, juros sem a comissao) fica fora: nao e' dinheiro
-        lancs = Transaction.query.filter(
+        pagina = Transaction.query.filter(
             Transaction.date >= start, Transaction.date <= end, Transaction.valor_informativo.is_(None)
-        ).order_by(Transaction.date.desc(), Transaction.id.desc()).all()
+        ).order_by(Transaction.date.desc(), Transaction.id.desc()).paginate(
+            page=page, per_page=per_page, max_per_page=MAX_LANCAMENTOS_POR_PAGINA, error_out=False)
+        lancs = pagina.items
 
         lancamentos = [{
             'id': t.id,
@@ -184,7 +269,12 @@ class HistoryService:
             'label': self._label(year, month),
             'resumo': resumo,
             'bancos': bancos_list,
+            'lucro_bruto': lucro,
             'lancamentos': lancamentos,
+            'lancamentos_total': pagina.total,
+            'lancamentos_paginas': pagina.pages,
+            'lancamentos_pagina': pagina.page,
+            'lancamentos_por_pagina': pagina.per_page,
         }
 
     # ------------------------------------------------------------------ #
@@ -208,5 +298,6 @@ class HistoryService:
             if y and m:
                 meses.add((int(y), int(m)))
 
-        ordenados = sorted(meses, reverse=True)
-        return [self.compute_summary(y, m) for (y, m) in ordenados]
+        # so o nome do mes: o resumo vem no detalhe do mes escolhido. Antes calculava o resumo de
+        # TODOS os meses (6 consultas cada) so para montar o seletor.
+        return [{'year': y, 'month': m, 'label': self._label(y, m)} for (y, m) in sorted(meses, reverse=True)]

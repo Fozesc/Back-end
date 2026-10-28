@@ -29,11 +29,14 @@ def check_if_token_revoked(jwt_header, jwt_payload):
     jti = jwt_payload["jti"]
     
    
-    from app.models.domain import TokenBlocklist 
+    from app.models.domain import TokenBlocklist, User
 
 
-    token = db.session.query(TokenBlocklist.id).filter_by(jti=jti).scalar()
-    return token is not None
+    if db.session.query(TokenBlocklist.id).filter_by(jti=jti).scalar() is not None:
+        return True
+    # usuario apagado ou desativado perde o acesso na hora, mesmo com o login ainda valendo
+    usuario = db.session.query(User.active).filter_by(id=int(jwt_payload["sub"])).first()
+    return usuario is None or usuario.active is False
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
@@ -111,6 +114,9 @@ def create_app():
             'ALTER TABLE recorrentes ADD COLUMN IF NOT EXISTS pago_atual DOUBLE PRECISION NOT NULL DEFAULT 0',
             # botao 'Enviar agora' da aba Backups: o worker de backup atende o pedido
             'ALTER TABLE backup_config ADD COLUMN IF NOT EXISTS envio_pedido_em TIMESTAMP',
+            # a auditoria so cresce e a tela sempre ordena/filtra por data: sem indice, cada
+            # pagina ordenava a tabela inteira
+            'CREATE INDEX IF NOT EXISTS ix_audit_logs_timestamp ON audit_logs (timestamp)',
         ):
             db.session.execute(text(comando))
         # Contas do caixa com um nome so (Dinheiro / BB / Caixa; 'Sistema (X)' no que o sistema

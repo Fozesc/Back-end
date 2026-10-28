@@ -1,11 +1,11 @@
 from flask import Blueprint, jsonify, request
 from app.services.audit_service import AuditService
-from flask_jwt_extended import jwt_required
+from app.controllers import so_admin
 bp = Blueprint('audit', __name__, url_prefix='/api/audit')
 service = AuditService()
 
 @bp.route('', methods=['GET'])
-@jwt_required()
+@so_admin
 def index():
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 20, type=int)
@@ -21,7 +21,7 @@ def index():
 
 
 @bp.route('/filtros', methods=['GET'])
-@jwt_required()
+@so_admin
 def filtros():
     """Acoes e alvos existentes, para a tela montar os filtros sem lista fixa."""
     return jsonify(service.get_filtros())

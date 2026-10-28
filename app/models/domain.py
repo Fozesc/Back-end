@@ -264,6 +264,7 @@ class ClientNote(db.Model):
 # --- CALENDARIO ---
 # Evento, nota ou lembrete numa data. Com `valor` + `previsao` ('entrada'/'saida') entra
 # na previsao do caixa ate ser marcado como concluido (ai o dinheiro ja esta no caixa).
+# `concluido` tambem tira o evento do sininho da tela inicial.
 class Evento(db.Model):
     __tablename__ = 'eventos'
     id = db.Column(db.Integer, primary_key=True)

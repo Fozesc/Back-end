@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from app.services.settings_service import SettingsService
-from flask_jwt_extended import get_jwt, jwt_required
+from flask_jwt_extended import jwt_required
+from app.controllers import so_admin
 
 bp = Blueprint('settings_bp', __name__)
 service = SettingsService()
@@ -17,23 +18,22 @@ def update_settings():
     return jsonify(service.update_settings(data))
 
 
-def _so_admin():
-    if get_jwt().get('role') != 'Admin':
-        return jsonify({'error': 'Só o administrador mexe no backup'}), 403
-
-
 @bp.route('/backup', methods=['GET'])
-@jwt_required()
+@so_admin
 def get_backup():
-    return _so_admin() or jsonify(service.get_backup())
+    return jsonify(service.get_backup())
+
+
+@bp.route('/backup/status', methods=['GET'])
+@so_admin
+def status_backup():
+    """Aviso da tela inicial quando o backup falha ou para de rodar."""
+    return jsonify(service.status_backup())
 
 
 @bp.route('/backup', methods=['PUT'])
-@jwt_required()
+@so_admin
 def update_backup():
-    negado = _so_admin()
-    if negado:
-        return negado
     try:
         return jsonify(service.update_backup(request.get_json(silent=True) or {}))
     except PermissionError as e:
@@ -43,11 +43,8 @@ def update_backup():
 
 
 @bp.route('/backup/enviar', methods=['POST'])
-@jwt_required()
+@so_admin
 def enviar_backup():
-    negado = _so_admin()
-    if negado:
-        return negado
     try:
         return jsonify(service.pedir_envio_backup())
     except PermissionError as e:

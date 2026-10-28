@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 from sqlalchemy import func, case
+from sqlalchemy.orm import joinedload
 from app import db
 from app.models.domain import Check, Client, Evento, Operation, Transaction
 from app.services.audit_service import AuditService
@@ -9,6 +10,9 @@ PREVISOES = ('entrada', 'saida')
 HORIZONTES = (30, 60, 90)
 MAX_DIAS = 62            # a tela pede um mes (grade de ate 6 semanas)
 MAX_CHEQUES = 2000
+AVISO_PROXIMOS = 7       # sininho: o que vem nos proximos dias
+AVISO_ATRASO = 30        # e o lembrete que passou e ninguem marcou como feito
+MAX_AVISOS = 30
 ABERTOS = ('Aguardando', 'Atrasado', 'Juridico', 'Devolvido')
 COM_SINAL = case((Transaction.type == 'entrada', func.abs(Transaction.amount)), else_=-func.abs(Transaction.amount))
 
@@ -63,7 +67,8 @@ class CalendarioService:
     def previsao(self):
         """Metodo do sistema financeiro: saldo do caixa + o que vai entrar ate a data - o
         que vai sair. O saldo e' o mesmo do Fluxo de Caixa (tudo que foi lancado, qualquer
-        data). Vencido fica a parte (nao entra)."""
+        data). Vencido fica a parte (nao entra). So os cartoes de cima do calendario: o
+        previsto dia a dia saiu da grade (pedido de 28/10/2026)."""
         hoje = date.today()
         saldo = float(db.session.query(func.coalesce(func.sum(COM_SINAL), 0.0)).scalar() or 0)
         # de HOJE em diante: cheque que vence hoje e evento de hoje ainda nao aconteceram
@@ -94,25 +99,11 @@ class CalendarioService:
             Check.operation_id, Client.id.label('cliente_id'), Client.name.label('cliente'),
         ).join(Operation, Check.operation_id == Operation.id).join(Client, Operation.client_id == Client.id).filter(
             Check.due_date >= d1, Check.due_date <= d2, Check.status.in_(ABERTOS), Check.fora_do_calculo.is_(False))
-        ev = Evento.query.filter(Evento.data >= d1, Evento.data <= d2)
+        ev = Evento.query.options(joinedload(Evento.client)).filter(Evento.data >= d1, Evento.data <= d2)
         if cliente_id:
             q = q.filter(Client.id == cliente_id)
             ev = ev.filter(Evento.client_id == cliente_id)
         cheques = q.order_by(Check.due_date, Check.id).limit(MAX_CHEQUES + 1).all()
-
-        # saldo previsto dia a dia (so do caixa inteiro, nao depende do filtro de cliente)
-        prev = self.previsao()
-        por_dia = self._movimento_previsto(hoje, d2) if d2 >= hoje else {}
-        saldo = prev['saldo']
-        saldo_dia = {}
-        d = hoje
-        while d <= d2:
-            m = por_dia.get(d.isoformat())
-            if m:
-                saldo += m['entra'] - m['sai']
-            if d >= d1:
-                saldo_dia[d.isoformat()] = round(saldo, 2)
-            d += timedelta(days=1)
 
         return {
             'inicio': d1.isoformat(), 'fim': d2.isoformat(), 'hoje': hoje.isoformat(),
@@ -124,9 +115,25 @@ class CalendarioService:
             } for c in cheques[:MAX_CHEQUES]],
             'cheques_cortados': len(cheques) > MAX_CHEQUES,
             'eventos': [_serialize_evento(e) for e in ev.order_by(Evento.data, Evento.id).limit(1000)],
-            'saldo_previsto': saldo_dia,
-            'previsao': prev,
+            'previsao': self.previsao(),
         }
+
+    # ------------------------------------------------------------------ sininho
+    def avisos(self):
+        """O que o sininho da tela inicial mostra: o que nao foi feito hoje e nos proximos dias,
+        e o que ja passou sem ninguem marcar como feito (lembrete ou valor combinado). Nota de
+        dia que ja passou nao volta: e' so anotacao."""
+        hoje = date.today()
+        pendente = Evento.query.options(joinedload(Evento.client)).filter(Evento.concluido.is_(False))
+        vem = pendente.filter(Evento.data >= hoje, Evento.data <= hoje + timedelta(days=AVISO_PROXIMOS))\
+            .order_by(Evento.data, Evento.id).limit(MAX_AVISOS).all()
+        passou = pendente.filter(Evento.data < hoje, Evento.data >= hoje - timedelta(days=AVISO_ATRASO),
+                                 db.or_(Evento.tipo == 'lembrete', Evento.valor.isnot(None)))\
+            .order_by(Evento.data.desc(), Evento.id).limit(MAX_AVISOS).all()
+        return {'hoje': hoje.isoformat(),
+                'atrasados': [_serialize_evento(e) for e in passou],
+                'de_hoje': [_serialize_evento(e) for e in vem if e.data == hoje],
+                'proximos': [_serialize_evento(e) for e in vem if e.data > hoje]}
 
     # ------------------------------------------------------------------ eventos
     def _validar(self, dados, evento=None):
@@ -175,7 +182,8 @@ class CalendarioService:
         e = db.session.get(Evento, id)
         if not e:
             return None
-        antes = f"{e.data:%d/%m/%Y} {e.titulo}" + (f" R$ {e.valor:.2f}" if e.valor else '')
+        antes = f"{e.data:%d/%m/%Y} {e.titulo}" + (f" R$ {e.valor:.2f}" if e.valor else '') \
+            + (' (feito)' if e.concluido else '')
         for campo, valor in self._validar(dados).items():
             setattr(e, campo, valor)
         db.session.commit()

@@ -1,7 +1,7 @@
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from app.models.domain import BackupConfig, CompanySettings, User
+from app.models.domain import AuditLog, BackupConfig, CompanySettings, User
 from app import db
 from app.services.audit_service import AuditService
 from flask_jwt_extended import get_jwt, get_jwt_identity
@@ -11,6 +11,10 @@ FREQUENCIAS = {'diario': 'todo dia útil', 'semanal': 'toda semana', 'mensal': '
 ARQUIVOS = {'freq_banco': 'banco', 'freq_planilha': 'planilha', 'freq_relatorio': 'relatório'}
 EMAIL = re.compile(r'[^@\s,;<>"]+@[^@\s,;<>"]+\.[^@\s,;<>".]+')
 MAX_DESTINATARIOS = 20
+# o que o worker de backup grava na auditoria (gerar_backup.auditar), separado pelo comeco do texto
+TIPOS_BACKUP = (('banco', 'Backup %', 'A cópia do banco'), ('email', 'E-mail do backup%', 'O envio do backup por e-mail'),
+                ('restauracao', 'Teste de restauração%', 'O teste de restauração do backup'))
+BACKUP_PARADO_HORAS = 48   # o worker faz copia todo dia as 12h e as 15h
 
 
 class SettingsService:
@@ -97,6 +101,27 @@ class SettingsService:
             'extension_rate': s.extension_rate,
             'fine_rate': s.fine_rate
         }
+
+    def status_backup(self):
+        """O aviso da tela inicial: o ultimo registro de cada tipo (copia do banco, e-mail, teste de
+        restauracao) que foi FALHA, e o backup parado ha mais de 2 dias. So conta a partir do
+        primeiro registro do worker, para nao avisar antes de ele rodar a 1a vez."""
+        do_worker = AuditLog.query.filter(AuditLog.target == 'Backup', AuditLog.action.in_(('BACKUP', 'FALHA')))
+        alertas, ultimo_ok = [], None
+        for tipo, padrao, nome in TIPOS_BACKUP:
+            ultimo = do_worker.filter(AuditLog.description.like(padrao)).order_by(AuditLog.timestamp.desc()).first()
+            if ultimo and ultimo.action == 'FALHA':
+                alertas.append({'tipo': tipo, 'quando': ultimo.timestamp.isoformat(timespec='minutes'),
+                                'texto': f"{nome} falhou", 'detalhe': (ultimo.description or '')[:300]})
+        ok = do_worker.filter(AuditLog.action == 'BACKUP', AuditLog.description.like('Backup %'))\
+            .order_by(AuditLog.timestamp.desc()).first()
+        if ok:
+            ultimo_ok = ok.timestamp.isoformat(timespec='minutes')
+            if ok.timestamp < datetime.now() - timedelta(hours=BACKUP_PARADO_HORAS) and \
+                    not any(a['tipo'] == 'banco' for a in alertas):
+                alertas.append({'tipo': 'parado', 'quando': ultimo_ok, 'texto': 'O backup parou de rodar',
+                                'detalhe': f"A última cópia do banco que deu certo foi em {ok.timestamp:%d/%m/%Y às %H:%M}."})
+        return {'alertas': alertas, 'ultimo_ok': ultimo_ok}
 
     def get_backup(self):
         return self._serialize_backup(db.session.get(BackupConfig, 1) or BackupConfig(destinatarios=[]))

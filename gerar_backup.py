@@ -67,6 +67,23 @@ def gravar_status(ok, mensagem, arquivo=None):
             "arquivo": os.path.basename(arquivo) if arquivo else None,
         }, f, ensure_ascii=False, indent=2)
 
+def auditar(acao, descricao):
+    """Deixa o backup na tela de Auditoria (alvo 'Backup'): BACKUP quando deu certo, FALHA
+    quando nao. Sem isso o unico jeito de saber se o backup rodou era olhar o servidor.
+    Falhar aqui (banco fora do ar) nunca derruba o backup."""
+    engine = create_engine(relatorio_backup.url_do_banco())
+    try:
+        with engine.begin() as c:
+            c.execute(text("INSERT INTO audit_logs (user_name, action, target, description, timestamp) "
+                           "VALUES ('Sistema (backup)', :acao, 'Backup', :descricao, :agora)"),
+                      {"acao": acao, "descricao": descricao[:2000], "agora": datetime.now()})
+    except Exception as e:
+        print(f"Aviso: não gravei na auditoria: {e}")
+    finally:
+        engine.dispose()
+
+NOME_TIPO = {"DIARIO": "diário", "SEMANAL": "semanal", "MENSAL": "mensal"}
+
 # Planilha do backup: uma aba por assunto, com o nome das colunas em portugues, para abrir no
 # Excel sem restaurar o banco. De fora de proposito: usuarios (tem a senha), auditoria e tokens.
 SITUACAO = "CASE WHEN c.status = 'Aguardando' AND c.due_date < CURRENT_DATE THEN 'Atrasado' ELSE c.status END"
@@ -245,10 +262,13 @@ def executar_backup(tipo="DIARIO"):
             limpar_antigos(DIR_SEMANAL, 30)
 
         gravar_status(True, f"{tipo}: {detalhe}", sql_file)
+        auditar("BACKUP", f"Backup {NOME_TIPO.get(tipo, tipo)} feito: {os.path.basename(sql_file)} "
+                          f"({tamanho/1024:.0f} KB, {detalhe})")
 
     except Exception as e:
         print(f"❌ Falha crítica durante o backup: {e}")
         gravar_status(False, f"{tipo} FALHOU: {e}", sql_file)
+        auditar("FALHA", f"Backup {NOME_TIPO.get(tipo, tipo)} FALHOU: {e}")
 
 def testar_restauracao(caminho=None):
     """Restaura o backup mais recente num banco descartável e confere os dados.
@@ -269,6 +289,7 @@ def testar_restauracao(caminho=None):
     ok, detalhe = conferir_dump(caminho)
     if not ok:
         print(f"❌ Arquivo reprovado antes mesmo de restaurar: {detalhe}")
+        auditar("FALHA", f"Teste de restauração de {os.path.basename(caminho)}: arquivo reprovado ({detalhe})")
         return False
     print(f"   arquivo íntegro ({detalhe})")
 
@@ -295,6 +316,7 @@ def testar_restauracao(caminho=None):
         r = rodar(f"set -o pipefail; gunzip -c '{caminho}' | {base} -d {temp_db} -v ON_ERROR_STOP=1 -q")
         if r.returncode != 0:
             print(f"❌ A restauração falhou: {r.stderr.strip()[:400]}")
+            auditar("FALHA", f"Teste de restauração de {os.path.basename(caminho)} FALHOU: {r.stderr.strip()[:400]}")
             return False
 
         consulta = ("select (select count(*) from clients) || ' clientes, ' || "
@@ -303,6 +325,7 @@ def testar_restauracao(caminho=None):
                     "(select count(*) from transactions) || ' transacoes'")
         r = rodar(f'{base} -d {temp_db} -tAc "{consulta}"')
         print(f"✅ Restauração comprovada — {r.stdout.strip()}")
+        auditar("BACKUP", f"Teste de restauração de {os.path.basename(caminho)} OK: {r.stdout.strip()}")
         return True
     finally:
         rodar(f'{base} -d postgres -c "DROP DATABASE IF EXISTS {temp_db}"')
@@ -311,7 +334,7 @@ def testar_restauracao(caminho=None):
 # Cada arquivo (banco, planilha, relatorio) sai na frequencia escolhida na aba Backups, sempre
 # depois do backup das 15h e so em dia util. Feriados de data fixa: os mesmos do
 # Front-end/src/utils/diasUteis.js (24 e 31/12 entram: nao tem banco).
-FERIADOS_FIXOS = {"01-01", "04-21", "05-01", "09-07", "10-12", "11-02", "11-15", "11-20", "12-24", "12-25", "12-31"}
+FERIADOS_FIXOS = {"01-01", "04-21", "05-01", "06-10", "09-07", "10-12", "11-02", "11-15", "11-20", "12-24", "12-25", "12-31"}
 
 def dia_util(d):
     if d.weekday() >= 5 or d.strftime("%m-%d") in FERIADOS_FIXOS:
@@ -411,6 +434,7 @@ def enviar_copia(hoje=None, arquivos=None):
         cfg = ler_config()
     except Exception as e:
         print(f"❌ Não consegui ler a configuração do backup: {e}")
+        auditar("FALHA", f"E-mail do backup não saiu: não consegui ler a configuração ({e})")
         return False
     if not cfg["destinatarios"]:
         print("📭 Cópia por e-mail desligada (ninguém na lista da aba Backups nem BACKUP_EMAIL no .env).")
@@ -457,6 +481,7 @@ def enviar_copia(hoje=None, arquivos=None):
                       for emails, lista, ok, saida in resultados)
     todos_ok = all(ok for *_, ok, _ in resultados)
     gravar_ultimo_envio(todos_ok, texto)
+    auditar("BACKUP" if todos_ok else "FALHA", f"E-mail do backup: {texto}")
     if pdf and all(ok for _, lista, ok, _ in resultados if "relatorio" in lista):
         with open(ARQUIVO_ULTIMO_EMAIL, "w") as f:
             json.dump({"data": hoje.isoformat(), "periodo": periodo}, f)

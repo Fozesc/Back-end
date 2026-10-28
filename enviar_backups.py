@@ -237,6 +237,12 @@ def main():
         linhas += [*anexo["texto"], ""]
     if anexos:
         linhas.append("Os arquivos abrem com a senha do backup.")
+    # Só no e-mail que leva o banco (vai só para quem foi marcado): daqui a anos, o jeito de abrir está aqui.
+    banco = next((a["arquivo"] for a in anexos if a["arquivo"].endswith(".sql.gz.enc")), None)
+    if banco:
+        linhas += ["", "Para abrir a cópia do banco no Mac: abra o Terminal na pasta onde salvou o anexo e rode "
+                   "o comando abaixo (ele pede a senha do backup; \"bad decrypt\" é senha errada):",
+                   f"  openssl enc -d {' '.join(CIFRA)} -in {banco} -out {banco.removesuffix('.enc')}"]
     linhas += ["", f"Mensagem automática do sistema {nome}."]
 
     conteudo = juntar([a["curto"] for a in anexos]) if anexos else "nenhum arquivo"

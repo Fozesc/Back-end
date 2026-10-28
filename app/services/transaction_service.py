@@ -9,6 +9,7 @@ from werkzeug.security import check_password_hash
 from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
 
 TIPOS = ('entrada', 'saida')
+MAX_POR_PAGINA = 100
 
 
 def _valor(bruto):
@@ -188,7 +189,7 @@ class TransactionService:
         if type_filter and type_filter != 'todos': filtros.append(Transaction.type == type_filter)
         query = Transaction.query.filter(*filtros).order_by(Transaction.date.desc(), Transaction.id.desc())
 
-        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        pagination = query.paginate(page=page, per_page=per_page, max_per_page=MAX_POR_PAGINA, error_out=False)
         # Totais do FILTRO inteiro (antes somava so a pagina da tela), somados no banco.
         # Valor absoluto por tipo: borderô grava saida negativa e lancamento antigo, positiva.
         entradas, saidas = db.session.query(

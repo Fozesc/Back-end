@@ -64,6 +64,15 @@ def emitentes():
                                             request.args.get('limit', 10, type=int)))
 
 
+@bp.route('/emitentes/risco', methods=['GET'])
+@jwt_required()
+def risco_emitentes():
+    """Sem ?nome: quem concentra mais dinheiro e quem mais deu problema. Com ?nome: so ele."""
+    nome = request.args.get('nome')
+    return jsonify(service.risco_emitentes(nome[:100] if nome is not None else None,
+                                           request.args.get('limit', 8, type=int)))
+
+
 @bp.route('/portfolio-total', methods=['GET'])
 @jwt_required()
 def portfolio_total():

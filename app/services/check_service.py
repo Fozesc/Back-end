@@ -463,6 +463,47 @@ class CheckService:
                   .limit(limite).all()
         return [nome for (nome,) in linhas]
 
+    def risco_emitentes(self, nome=None, limite=8):
+        """Concentracao e problemas por emitente (quem assinou o cheque), somado no banco.
+
+        Sem `nome`: os que mais tem dinheiro em aberto com a empresa e os que mais deram
+        problema (devolvido, juridico, vencido sem pagar). Com `nome`: so aquele emitente,
+        para o borderô avisar antes de aceitar mais um cheque dele. O nome e' comparado sem
+        maiusculas e sem espaco nas pontas."""
+        limite = max(1, min(int(limite or 8), 20))
+        hoje = date.today()
+        chave = func.upper(func.trim(Check.issuer_name))
+        no_calculo = Check.fora_do_calculo.is_(False)
+        aberto = and_(Check.status != 'Pago', no_calculo)
+        vencido = and_(no_calculo, or_(Check.status == 'Atrasado',
+                                       and_(Check.status == 'Aguardando', Check.due_date < hoje)))
+        soma = lambda cond: func.coalesce(func.sum(case((cond, 1), else_=0)), 0)
+        em_aberto = func.coalesce(func.sum(case((aberto, Check.amount), else_=0)), 0)
+        devolvidos, juridico, vencidos = soma(Check.status == 'Devolvido'), soma(Check.status == 'Juridico'), soma(vencido)
+        q = db.session.query(
+            func.min(Check.issuer_name), em_aberto, soma(aberto), devolvidos, juridico, vencidos,
+            func.count(func.distinct(Operation.client_id)), func.count(Check.id),
+        ).join(Operation, Check.operation_id == Operation.id)\
+         .filter(Check.issuer_name.isnot(None), func.trim(Check.issuer_name) != '').group_by(chave)
+
+        def linha(r):
+            return {'emitente': r[0], 'em_aberto': round(float(r[1]), 2), 'titulos_abertos': int(r[2]),
+                    'devolvidos': int(r[3]), 'juridico': int(r[4]), 'vencidos': int(r[5]),
+                    'clientes': int(r[6]), 'titulos': int(r[7])}
+
+        if nome is not None:
+            nome = ' '.join(str(nome).split()).upper()
+            r = q.filter(chave == nome).first() if nome else None
+            return linha(r) if r else None
+
+        total = float(db.session.query(func.coalesce(func.sum(Check.amount), 0)).filter(aberto).scalar() or 0)
+        maiores = [linha(r) for r in q.having(em_aberto > 0).order_by(em_aberto.desc()).limit(limite)]
+        for m in maiores:
+            m['pct'] = round(100 * m['em_aberto'] / total, 1) if total else 0
+        problemas = [linha(r) for r in q.having(devolvidos + juridico + vencidos > 0)
+                     .order_by((devolvidos + juridico + vencidos).desc(), em_aberto.desc()).limit(limite)]
+        return {'total_em_aberto': round(total, 2), 'maiores': maiores, 'problemas': problemas}
+
     def get_portfolio_total(self):
         # Inclui 'Prorrogado' (título renegociado ainda a receber) no total da carteira.
         # Cheque marcado como 'fora do calculo' (historico da planilha) nao entra.

@@ -1,3 +1,23 @@
+from functools import wraps
+from flask import jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
+
+
+def so_admin(rota):
+    """Rota so para Admin. Confere o cargo no BANCO, nao no token: quem perdeu o cargo perde
+    o acesso na hora, sem esperar o login vencer."""
+    @wraps(rota)
+    @jwt_required()
+    def protegida(*args, **kwargs):
+        from app import db
+        from app.models.domain import User
+        usuario = db.session.get(User, int(get_jwt_identity()))
+        if not usuario or usuario.role != 'Admin':
+            return jsonify({'error': 'Só o administrador pode fazer isso'}), 403
+        return rota(*args, **kwargs)
+    return protegida
+
+
 def register_blueprints(app):
     # Importações
     from .client_controller import bp as client_bp

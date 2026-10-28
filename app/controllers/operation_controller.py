@@ -41,7 +41,7 @@ def index():
 def get_by_client(client_id):
 
     try:
-        data = service.get_by_client(client_id)
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify(service.get_by_client(client_id, request.args.get('page', 1, type=int),
+                                             request.args.get('per_page', 10, type=int)))
+    except Exception:
+        return jsonify({'error': 'Não foi possível carregar os borderôs do cliente'}), 500

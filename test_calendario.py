@@ -1,8 +1,8 @@
 """
-Calendario (cheques por vencimento, eventos/notas/lembretes, filtro por cliente) e a
-previsao do caixa no metodo do sistema financeiro: saldo do caixa + a receber - a pagar
-ate a data; vencido fica a parte. Tambem a regra do caixa: lancamento com data futura
-entra na conta (o saldo e' tudo que foi lancado) e nao e' somado de novo na previsao.
+Calendario (cheques por vencimento com valor, eventos/notas/lembretes, filtro por cliente), o
+sininho e a previsao do caixa dos cartoes de cima (saldo do caixa + a receber - a pagar ate a
+data; vencido a parte). O previsto DIA A DIA saiu da grade (pedido de 28/10/2026). Tambem a regra
+do caixa: lancamento com data futura entra na conta e nao e' somado de novo na previsao.
 Banco SEPARADO (fozesc_teste_calendario), criado e apagado pelo teste.
 
 Rode:  ./venv/bin/python test_calendario.py
@@ -105,7 +105,7 @@ def main():
         e5 = novo(titulo='Visita Maria', data=D(8), cliente_id=id_b)
         assert e2['autor'] == 'Teste' and e2['cliente'] == 'Lucas' and e1['valor'] == 700
 
-        # --------------------------------------------- previsao (metodo do financeiro)
+        # --------------------------------------------- previsao (cartoes de cima)
         p = http.get('/api/calendario/previsao', headers=cab).get_json()
         assert p['saldo'] == 1600 and (p['vencido'], p['qtd_vencidos']) == (300, 1), p
         assert [(h['dias'], h['a_receber'], h['a_pagar'], h['saldo_previsto']) for h in p['horizontes']] == [
@@ -117,11 +117,30 @@ def main():
         m = http.get(C, headers=cab, query_string={'inicio': D(-5), 'fim': D(50)}).get_json()
         assert [(c['numero'], c['status']) for c in m['cheques']] == [('A2', 'Atrasado'), ('A1', 'Aguardando'), ('B1', 'Aguardando')], m['cheques']
         assert {e['titulo'] for e in m['eventos']} == {'Pagar aluguel', 'Ligar para o Lucas', 'Receber acordo', 'Já pago', 'Visita Maria'}
-        sp = m['saldo_previsto']
-        assert D(-1) not in sp, 'dia que ja passou nao tem previsao'
-        assert (sp[D(0)], sp[D(2)], sp[D(5)], sp[D(15)], sp[D(40)], sp[D(50)]) == (1600, 1600, 2600, 1900, 2400, 2600), sp
+        assert [c['valor'] for c in m['cheques']] == [300, 1000, 500], 'cada cheque vem com o valor que vence no dia'
+        assert 'saldo_previsto' not in m, 'o previsto dia a dia saiu da grade (pedido de 28/10/2026)'
+        assert m['previsao']['horizontes'][0]['saldo_previsto'] == 1900, 'os cartoes de cima continuam'
         so_lucas = http.get(C, headers=cab, query_string={'inicio': D(-5), 'fim': D(50), 'cliente_id': id_a}).get_json()
         assert [c['numero'] for c in so_lucas['cheques']] == ['A2', 'A1'] and [e['titulo'] for e in so_lucas['eventos']] == ['Ligar para o Lucas']
+
+        # ------------------------------------------------------------ sininho
+        A = '/api/calendario/avisos'
+        assert http.get(A).status_code == 401
+        hoje_ev = novo(titulo='Reunião hoje', data=D(0))
+        nota_velha = novo(titulo='Nota antiga', data=D(-2), tipo='nota')
+        lembrete_velho = novo(titulo='Cobrar Maria', data=D(-4), tipo='lembrete')
+        muito_velho = novo(titulo='Lembrete de 2 meses', data=D(-60), tipo='lembrete')
+        longe = novo(titulo='Daqui 20 dias', data=D(20))
+        av = http.get(A, headers=cab).get_json()
+        assert [e['titulo'] for e in av['de_hoje']] == ['Reunião hoje'], av
+        assert [e['titulo'] for e in av['proximos']] == ['Ligar para o Lucas'], 'D+8 passa dos 7 dias'
+        assert [e['titulo'] for e in av['atrasados']] == ['Cobrar Maria'], 'nota passada e lembrete muito antigo ficam de fora'
+        assert av['proximos'][0]['cliente'] == 'Lucas'
+        r = http.put(f"{E}/{lembrete_velho['id']}", headers=cab, json={**lembrete_velho, 'concluido': True})
+        assert r.status_code == 200, 'qualquer evento pode ser marcado como feito'
+        assert http.get(A, headers=cab).get_json()['atrasados'] == [], 'feito sai do sininho'
+        for e in (hoje_ev, nota_velha, lembrete_velho, muito_velho, longe):
+            assert http.delete(f"{E}/{e['id']}", headers=cab).status_code == 204
 
         # --------------------------------------------------- editar, concluir e apagar
         r = http.put(f"{E}/{e1['id']}", headers=cab, json={**e1, 'concluido': True})
@@ -138,11 +157,11 @@ def main():
         with app.app_context():
             assert db.session.get(Evento, e5['id']).client_id == id_a
             acoes = sorted(l.action for l in AuditLog.query.filter_by(target='Calendario'))
-            assert acoes == ['CREATE'] * 5 + ['DELETE', 'UPDATE'], acoes
+            assert acoes == ['CREATE'] * 10 + ['DELETE'] * 6 + ['UPDATE'] * 2, acoes
 
         print("OK: calendario com cheques em aberto por vencimento (pago e fora do calculo fora, vencido marcado), "
-              "eventos/notas/lembretes validados, filtro por cliente, previsao 30/60/90 = saldo do caixa + a receber "
-              "- a pagar (vencido a parte, concluido fora), saldo previsto dia a dia, e data futura no saldo sem contar 2 vezes.")
+              "valor de cada cheque no dia, eventos/notas/lembretes validados, filtro por cliente, previsao 30/60/90 nos "
+              "cartoes (sem previsto dia a dia na grade), sininho (hoje, proximos 7 dias e lembrete atrasado) e data futura no saldo.")
     finally:
         if _app is not None:
             with _app.app_context():

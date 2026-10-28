@@ -23,6 +23,12 @@ def previsao():
     return jsonify(service.previsao())
 
 
+@bp.route('/avisos', methods=['GET'])
+@jwt_required()
+def avisos():
+    return jsonify(service.avisos())
+
+
 @bp.route('/eventos', methods=['POST'])
 @jwt_required()
 def criar():
