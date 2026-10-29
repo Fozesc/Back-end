@@ -1033,12 +1033,18 @@ class CheckService:
         # comissao descontada num vale: o desconto fica, ate o tamanho da comissao nova
         desconto = next((t for t in linhas if t.vale_id), None)
         no_vale = round(min(abs(desconto.amount), op.comissao_valor), 2) if desconto and sobra else 0.0
-        novo, cliente, comissao = {}, 0.0, 0.0
+        novo, comissao = {}, 0.0
+        # saida do cliente dividida em partes (2.11.2): o liquido do titulo sai da ultima parte e o
+        # que nao couber nela, da anterior - a soma das partes diminui exatamente o liquido dele
+        falta = liquido
+        for t in reversed([t for t in linhas if t.category == 'Compra de Ativos']):
+            tira = round(min(abs(t.amount), falta), 2) if sobra else abs(t.amount)
+            novo[t.id] = round(abs(t.amount) - tira, 2)
+            falta = round(falta - tira, 2)
+        cliente = round(sum(novo[t.id] for t in linhas if t.category == 'Compra de Ativos'), 2)
         for t in linhas:
             if t.vale_id:
                 novo[t.id] = no_vale
-            elif t.category == 'Compra de Ativos':
-                novo[t.id] = cliente = round(abs(t.amount) - liquido, 2) if sobra else 0.0
             elif t.category == 'Comissão':
                 novo[t.id] = comissao = op.comissao_valor if sobra else 0.0
         for t in linhas:
@@ -1221,6 +1227,14 @@ class CheckService:
         total_titulos = Check.query.filter_by(operation_id=op.id).count()
         abat = Transaction.query.with_entities(Transaction.vale_id, Transaction.amount).filter(
             Transaction.operation_id == op.id, Transaction.check_id.is_(None), Transaction.vale_id.isnot(None)).first()
+        # saida dividida em mais de uma conta: "Dinheiro R$ 5.000,00 + BB R$ 9.515,00"
+        saidas = Transaction.query.with_entities(Transaction.origin, Transaction.amount).filter(
+            Transaction.operation_id == op.id, Transaction.check_id.is_(None),
+            Transaction.category == 'Compra de Ativos').order_by(Transaction.id).all()
+        conta_saida = op.account_source
+        if len(saidas) > 1:
+            conta_saida = ' + '.join(f"{(o or '').replace('Sistema (', '').rstrip(')')} R$ {reais(abs(v))}"
+                                     for o, v in saidas)
         return {
             **self._serialize_check(c),
             'bordero': {
@@ -1229,7 +1243,7 @@ class CheckService:
                 'lancado_em': op.created_at.strftime('%Y-%m-%d %H:%M') if op.created_at else None,
                 'taxa_mensal': float(op.monthly_rate or 0),
                 'dias_compensacao': op.compensation_days or 0,
-                'conta_saida': None if importado else op.account_source,
+                'conta_saida': None if importado else conta_saida,
                 'iof': float(op.iof_amount or 0),
                 'comissao': float(op.comissao or 0),
                 'comissao_valor': float(op.comissao_valor or 0),

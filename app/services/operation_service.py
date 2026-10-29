@@ -250,6 +250,18 @@ class OperationService:
             new_operation.iof_amount = round(acumulado_iof, 2)
             new_operation.total_net_value = liquido_entregue
 
+            # saida dividida (parte do dinheiro, parte do banco): a mesma validacao do Receber, a
+            # soma tem que fechar com o liquido. A conta do borderô vira a da maior parte.
+            partes = None
+            if data.get('partes'):
+                from app.services.check_service import CheckService
+                partes = CheckService()._validar_partes(data['partes'], liquido_entregue, 'líquido do borderô')
+                conta_origem = max(partes, key=lambda p: p[2])[0]
+                if len(partes) == 1:
+                    partes = None
+                new_operation.account_source = conta_origem
+                origem_sistema = f"Sistema ({conta_origem})"
+
             # comissao descontada de um vale: abate ate o que falta nele e so o resto sai do caixa
             vale, saldo_vale, no_vale = None, 0.0, 0.0
             if data.get('vale_id') not in (None, ''):
@@ -260,25 +272,27 @@ class OperationService:
                 no_vale = round(min(new_operation.comissao_valor, saldo_vale), 2)
             comissao_no_caixa = round(new_operation.comissao_valor - no_vale, 2)
 
-            transaction = Transaction(
-                date=new_operation.operation_date,
-                description=f"Pgto Borderô #{new_operation.id} - {client.name}",
-                amount=liquido_entregue * -1,
-                type='saida',
-                origin=origem_sistema,
-                category='Compra de Ativos',
-                operation_id=new_operation.id
-            )
+            rotulo = f"Borderô #{new_operation.id} - {client.name}"
+            inicio = 'Cliente recebe - ' if new_operation.comissao_valor > 0 else 'Pgto '
+
+            def saida_cliente(conta, valor, sufixo=''):
+                return Transaction(date=new_operation.operation_date, description=f"{inicio}{rotulo}{sufixo}"[:200],
+                                   amount=-valor, type='saida', origin=f"Sistema ({conta})",
+                                   category='Compra de Ativos', operation_id=new_operation.id)
+
+            if partes:
+                saidas = [saida_cliente(conta, valor, f" (Parte {i}/{len(partes)}" + (f" · {forma}" if forma else '') + ")")
+                          for i, (conta, forma, valor) in enumerate(partes, 1)]
+            else:
+                saidas = [saida_cliente(conta_origem, liquido_entregue)]
             if new_operation.comissao_valor > 0:
                 # o cliente recebe o liquido e a comissao e' paga a parte: a 1a linha (so
                 # informativa) e' o total que sai do banco = cliente + comissao, as de baixo
-                rotulo = f"Borderô #{new_operation.id} - {client.name}"
-                transaction.description = f"Cliente recebe - {rotulo}"[:200]
                 linhas = [
                     linha_informativa(new_operation.operation_date, origem_sistema,
                                       round(liquido_entregue + comissao_no_caixa, 2), 'saida',
                                       f"Pgto {rotulo}", operation_id=new_operation.id),
-                    transaction,
+                    *saidas,
                     linha_comissao(new_operation.operation_date, origem_sistema, new_operation.comissao_valor,
                                    rotulo + (f" · R$ {reais(no_vale)} descontados no vale #{vale.id}" if vale else ''),
                                    f"{comissao / new_operation.monthly_rate * 100:.4g}%".replace('.', ','),
@@ -290,8 +304,10 @@ class OperationService:
                     linhas.append(abatimento(vale, saldo_vale, no_vale, new_operation.operation_date, origem_sistema,
                                              f"comissão do {rotulo}", operation_id=new_operation.id))
                 agrupar(linhas)
+            elif len(saidas) > 1:
+                agrupar(saidas)   # as partes aparecem juntas no Fluxo de Caixa
             else:
-                db.session.add(transaction)
+                db.session.add(saidas[0])
 
             db.session.commit()
 
@@ -314,6 +330,8 @@ class OperationService:
                          else ", nada saiu do caixa)") if vale else '')
                    + "\n" if comissao else '') +
                 f"Valor Líquido Entregue: R$ {new_operation.total_net_value:.2f}\n"
+                + (f"Saiu de: " + " + ".join(f"{conta} R$ {valor:.2f}" + (f" ({forma})" if forma else '')
+                                             for conta, forma, valor in partes) + "\n" if partes else '') +
                 f"Cheques ({len(data['checks'])}): {resumo_cheques_str}"
             )
 
