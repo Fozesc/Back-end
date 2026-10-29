@@ -2,7 +2,9 @@
 O juros e o liquido gravados em cada cheque sao EXATAMENTE os da tela do Borderô:
 
   1. borderô criado pela tela grava centavo por centavo o que a tela mostrou (com e
-     sem IOF), e caixa, total de juros e IOF do borderô sao a soma desses mesmos numeros;
+     sem IOF), e caixa, total de juros e IOF do borderô sao a soma desses mesmos numeros.
+     Desde a 2.11.1 o pagamento do cliente nao tem centavos: o liquido de cada cheque sobe
+     para o proximo real e a diferenca sai dos juros dele (total 10.243,03 -> 10.246,00);
   2. numero adulterado (juros que nao confere com a conta) e' recusado sem gravar nada;
   3. tela antiga (sem mandar os centavos) grava a mesma conta, calculada no servidor;
   4. alinhar_juros.py corrige borderô antigo que confere com o caixa e nao mexe no que
@@ -50,12 +52,15 @@ def sql_admin(*comandos):
     conn.close()
 
 
-def tela(valor, data_op, vencs, taxa, comp, iof):
-    """As linhas do borderô como a tela calcula (calcularDias + calcularLinha)."""
-    codigo = (f"import('{UTIL}').then(m => console.log(JSON.stringify({json.dumps(vencs)}.map(v => {{"
-              f" const dias = m.calcularDias('{data_op}', v, {comp});"
+def tela(valor, data_op, vencs, taxa, comp, iof, pagamento_redondo=True):
+    """As linhas do borderô como a tela calcula (calcularDias + calcularLinha + arredondarPagamento).
+    pagamento_redondo=False = a conta de antes da 2.11.1 (borderô antigo)."""
+    linhas = (f"{json.dumps(vencs)}.map(v => {{ const dias = m.calcularDias('{data_op}', v, {comp});"
               f" return {{ vencimento: v, valor: {valor}, dias, ...m.calcularLinha({{ valor: {valor}, dias,"
-              f" taxaMensal: {taxa}, iofEnabled: {str(iof).lower()}, iofBase: 0.38, iofDiario: 0.0082 }}) }}; }}))))")
+              f" taxaMensal: {taxa}, iofEnabled: {str(iof).lower()}, iofBase: 0.38, iofDiario: 0.0082 }}) }}; }})")
+    if pagamento_redondo:
+        linhas = f"m.arredondarPagamento({linhas}).linhas"
+    codigo = f"import('{UTIL}').then(m => console.log(JSON.stringify({linhas})))"
     return json.loads(subprocess.run(['node', '-e', codigo], capture_output=True, text=True, check=True).stdout)
 
 
@@ -111,7 +116,7 @@ def main():
             assert op.iof_amount == round(sum(l['iof'] for l in linhas), 2)
             assert op.total_net_value == round(sum(l['liquido'] for l in linhas), 2) == -caixa
             if not iof:
-                assert op.total_interest == 3515.17 and op.total_net_value == 10243.03, op.total_interest
+                assert op.total_interest == 3512.20 and op.total_net_value == 10246.00, op.total_interest
 
         # --------------------------------------- 2. adulterado: recusa e nao grava nada
         with app.app_context():
@@ -137,18 +142,18 @@ def main():
         da_tela = json.loads(subprocess.run(['node', '-e', codigo], capture_output=True, text=True, check=True).stdout)
         r = http.post('/api/operations', headers=cab, json={**payload(linhas, False), 'comissao': 1})
         assert r.status_code == 201, r.data
-        assert r.get_json()['comissao_valor'] == da_tela['valor'] == 878.79, (r.get_json()['comissao_valor'], da_tela)
+        assert r.get_json()['comissao_valor'] == da_tela['valor'] == 878.05, (r.get_json()['comissao_valor'], da_tela)
         op, chs, caixa = gravado(r.get_json()['id'])
         assert op.comissao == 1 and chs == [(l['juros'], l['liquido'], l['dias']) for l in linhas]
-        assert op.total_interest == 3515.17 and op.total_net_value == 10243.03 == -caixa, 'comissao mexeu no borderô'
+        assert op.total_interest == 3512.20 and op.total_net_value == 10246.00 == -caixa, 'comissao mexeu no borderô'
         # no caixa: saida do borderô + comissao (sai hoje) + juros sem a comissao (so informativo), ligadas
         with app.app_context():
             ls = Transaction.query.filter_by(operation_id=op.id).order_by(Transaction.id).all()
             # 1a linha (so informativa) = total que sai do banco; as de baixo: cliente + comissao
             assert [(t.category, t.type, t.amount, t.valor_informativo) for t in ls] == [
-                ('Informativo', 'saida', 0.0, 11121.82),
-                ('Compra de Ativos', 'saida', -10243.03, None),
-                ('Comissão', 'saida', -878.79, None)], [(t.category, t.amount, t.valor_informativo) for t in ls]
+                ('Informativo', 'saida', 0.0, 11124.05),
+                ('Compra de Ativos', 'saida', -10246.00, None),
+                ('Comissão', 'saida', -878.05, None)], [(t.category, t.amount, t.valor_informativo) for t in ls]
             assert ls[0].valor_informativo == round(-ls[1].amount - ls[2].amount, 2), 'total = cliente + comissao'
             assert {t.grupo_id for t in ls} == {ls[0].id}, 'as 3 linhas ligadas pelo id da primeira'
             assert ls[0].description.startswith('Pgto Borderô #') and ls[1].description.startswith('Cliente recebe - Borderô #')
@@ -157,16 +162,16 @@ def main():
         lista = http.get('/api/transactions', headers=cab, query_string={'per_page': 1, 'search': f'Borderô #{op.id} '}).get_json()
         assert lista['total'] == 3 and {l['grupo_id'] for l in lista['items']} == {ls[0].id}
         # o resumo e' do filtro inteiro (nao so da pagina) e a linha informativa nao soma de novo
-        assert round(lista['summary']['saidas'], 2) == 11121.82, 'o total informativo nao soma de novo no caixa'
+        assert round(lista['summary']['saidas'], 2) == 11124.05, 'o total informativo nao soma de novo no caixa'
         assert http.put(f"/api/transactions/{ls[0].id}", headers=cab, json={'valor': 10}).status_code == 400, \
             'linha informativa nao se edita'
         with app.app_context():
             from app.models.domain import AuditLog
             primeiro = Check.query.filter_by(operation_id=op.id).order_by(Check.id).first().id
-            assert 'Comissão: 1 de 4 pontos da taxa (25.0% dos juros) = R$ 878.79' in \
+            assert 'Comissão: 1 de 4 pontos da taxa (25.0% dos juros) = R$ 878.05' in \
                 AuditLog.query.filter_by(target='Borderô').order_by(AuditLog.id.desc()).first().description
         b = http.get(f'/api/checks/{primeiro}', headers=cab).get_json()['bordero']
-        assert (b['comissao'], b['comissao_valor']) == (1, 878.79), b
+        assert (b['comissao'], b['comissao_valor']) == (1, 878.05), b
 
         with app.app_context():
             antes = (Operation.query.count(), Check.query.count(), Transaction.query.count())
@@ -187,17 +192,31 @@ def main():
             assert (Operation.query.count(), Check.query.count(), Transaction.query.count()) == antes
 
         r = http.post('/api/operations', headers=cab, json={**payload(linhas, False), 'comissao': 4})
-        assert r.get_json()['comissao_valor'] == 3515.17, 'comissao igual a taxa = os juros inteiros'
+        assert r.get_json()['comissao_valor'] == 3512.20, 'comissao igual a taxa = os juros inteiros'
         r = http.post('/api/operations', headers=cab, json=payload(linhas, False))
         assert r.status_code == 201 and r.get_json()['comissao_valor'] == 0 and r.get_json()['comissao'] == 0
         with app.app_context():
             sem = Transaction.query.filter_by(operation_id=r.get_json()['id']).all()
             assert len(sem) == 1 and sem[0].grupo_id is None, 'sem comissao continua uma linha so'
         saldo_depois = http.get('/api/transactions/balances', headers=cab).get_json()['bruto']['dinheiro_total']
-        assert round(saldo_dinheiro - saldo_depois, 2) == round(10243.03 + 3515.17 + 10243.03, 2), 'comissao 4 de 4 + borderô sem comissao'
+        assert round(saldo_dinheiro - saldo_depois, 2) == round(10246.00 + 3512.20 + 10246.00, 2), 'comissao 4 de 4 + borderô sem comissao'
+
+        # ------------ 6. pagamento sem centavos: o servidor arredonda igual a tela (2.000 sorteados)
+        from app.services.operation_service import arredondar_pagamento
+        codigo = (f"import('{UTIL}').then(m => {{ let s = 11; const r = () => (s = (s * 16807) % 2147483647) / 2147483647;"
+                  " const casos = []; for (let n = 0; n < 2000; n++) { const t = 1 + Math.round(r() * 900) / 100;"
+                  " const ls = Array.from({ length: 1 + Math.floor(r() * 12) }, () => { const valor = Math.round(r() * 2000000) / 100 + 50;"
+                  " return m.calcularLinha({ valor, dias: 3 + Math.floor(r() * 360), taxaMensal: t, iofEnabled: r() < 0.5, iofBase: 0.38, iofDiario: 0.0082 }); })"
+                  ".filter(l => l.liquido > 0); casos.push({ antes: ls, depois: m.arredondarPagamento(ls).linhas }); }"
+                  " console.log(JSON.stringify(casos)); })")
+        casos = json.loads(subprocess.run(['node', '-e', codigo], capture_output=True, text=True, check=True).stdout)
+        for caso in casos:
+            contas = [[l['juros'], l['iof'], l['liquido']] for l in caso['antes']]
+            arredondar_pagamento(contas)
+            assert contas == [[l['juros'], l['iof'], l['liquido']] for l in caso['depois']], (caso, contas)
 
         # ------------ 4. alinhar_juros: borderô gravado com a formula antiga, caixa certo
-        linhas = tela(1375.82, '2026-09-29', VENCS, 4, 2, False)
+        linhas = tela(1375.82, '2026-09-29', VENCS, 4, 2, False, pagamento_redondo=False)
         with app.app_context():
             op = Operation(client_id=cli_id, client_name_snapshot='Cliente Teste', operation_date=date(2026, 9, 29),
                            monthly_rate=4, compensation_days=2, iof_amount=0, total_face_value=13758.2,
@@ -227,7 +246,8 @@ def main():
             assert ruim.total_interest == 935.68, "mexeu em borderô que nao confere com o caixa"
             assert {c.interest_amount for c in Check.query.filter_by(operation_id=ruim_id)} == {467.84}
 
-        print("OK: cheque grava exatamente o juros/IOF/liquido da tela (com e sem IOF), caixa e totais "
+        print("OK: pagamento do cliente sem centavos (cada cheque sobe para o proximo real, tirado dos juros dele), "
+              "cheque grava exatamente o juros/IOF/liquido da tela (com e sem IOF), caixa e totais "
               "sao a soma dos mesmos numeros, adulterado recusado sem gravar, tela antiga da o mesmo "
               "resultado, comissao igual a da tela sem mexer no liquido (invalida recusada), cheque negativo ou "
               "com juros maior que o valor recusado, "

@@ -189,7 +189,13 @@ def main():
         assert (s['bb_total'], s['caixa_total']) == (300, -100), 'saem os juros (400), a comissao (200) e o desconto (100) do C'
 
         # ================================================ borderô: a comissao nasce com ele
-        from app.services.operation_service import calcular_comissao, calcular_linha
+        from app.services.operation_service import arredondar_pagamento, calcular_comissao, calcular_linha
+
+        def redondo(*linhas):
+            """As linhas como o borderô grava desde a 2.11.1: pagamento do cliente sem centavos."""
+            contas = [list(l) for l in linhas]
+            arredondar_pagamento(contas)
+            return [tuple(c) for c in contas]
         vb, vp = novo_vale('Vale grande', 1000), novo_vale('Vale pequeno', 5)
         bb = lambda: round(saldos()['bb_total'], 2)
 
@@ -209,7 +215,7 @@ def main():
             assert Operation.query.count() == ops_antes, 'borderô recusado nao grava nada'
 
         # comissao inteira no vale: do caixa so sai o cliente
-        (j1, _, l1), (j2, _, l2) = calcular_linha(1000, 30, 4), calcular_linha(2000, 60, 4)
+        (j1, _, l1), (j2, _, l2) = redondo(calcular_linha(1000, 30, 4), calcular_linha(2000, 60, 4))
         com, com2 = calcular_comissao(j1 + j2, 2, 4), calcular_comissao(j2, 2, 4)
         antes = bb()
         r = bordero([(1000, 30), (2000, 60)], vale_id=vb)
@@ -230,7 +236,7 @@ def main():
         assert det['comissao_valor'] == com and det['comissao_vale'] == {'vale': vb, 'valor': com}, det
 
         # comissao maior que o vale: quita e o resto sai do caixa (da conta do borderô)
-        (j3, _, l3) = calcular_linha(1000, 30, 4)
+        (j3, _, l3), = redondo(calcular_linha(1000, 30, 4))
         antes = bb()
         r = bordero([(1000, 30)], vale_id=vp)
         assert r.status_code == 201, r.data

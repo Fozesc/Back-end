@@ -49,7 +49,13 @@ def main():
     try:
         from app import create_app, db
         from app.models.domain import AuditLog, Check, Client, CompanySettings, Operation, Transaction, User
-        from app.services.operation_service import calcular_comissao, calcular_linha
+        from app.services.operation_service import arredondar_pagamento, calcular_comissao, calcular_linha
+
+        def redondo(*linhas):
+            """As linhas como o borderô grava desde a 2.11.1: pagamento do cliente sem centavos."""
+            contas = [list(l) for l in linhas]
+            arredondar_pagamento(contas)
+            return [tuple(c) for c in contas]
         from werkzeug.security import generate_password_hash
 
         app = create_app()
@@ -76,8 +82,8 @@ def main():
                        {'valor': 2000, 'vencimento': (HOJE + timedelta(days=60)).isoformat(), 'num_doc': '2'}]})
         assert r.status_code == 201, r.data
         op_id = r.get_json()['id']
-        (j1, i1, l1), (j2, i2, l2) = (calcular_linha(1000, 30, 4, True, 0.38, 0.0082),
-                                      calcular_linha(2000, 60, 4, True, 0.38, 0.0082))
+        (j1, i1, l1), (j2, i2, l2) = redondo(calcular_linha(1000, 30, 4, True, 0.38, 0.0082),
+                                             calcular_linha(2000, 60, 4, True, 0.38, 0.0082))
         com_total, com_2 = calcular_comissao(j1 + j2, 2, 4), calcular_comissao(j2, 2, 4)
         assert bb() == round(-(l1 + l2) - com_total, 2), bb()
         with app.app_context():

@@ -34,6 +34,35 @@ def calcular_linha(valor_face, dias, taxa_mensal, iof_ativo=False, iof_base=0.0,
     return juros, iof, arredondar(valor_face - juros - iof)
 
 
+def _falta_para_o_real(centavos):
+    return (-(-centavos // 100) * 100 - centavos) / 100
+
+
+def arredondar_pagamento(linhas):
+    """Igual ao arredondarPagamento() da tela (versao 2.11.1): o liquido de CADA cheque sobe para
+    o proximo real e o que falta sai dos juros do proprio cheque; cheque sem juros para isso fica
+    como esta e, se o total ainda sobrar centavo, ele sai dos juros do ultimo cheque que der (senao
+    o de mais juros). `linhas` = [[juros, iof, liquido, ...], ...], alterado no lugar. Devolve
+    quanto o total subiu."""
+    def subir(linha, falta):
+        linha[0] = arredondar(linha[0] - falta)
+        linha[2] = arredondar(linha[2] + falta)
+
+    antes = sum(int(round(l[2] * 100)) for l in linhas)
+    for linha in linhas:
+        falta = _falta_para_o_real(int(round(linha[2] * 100)))
+        if falta > 0 and linha[0] >= falta:
+            subir(linha, falta)
+    falta = _falta_para_o_real(sum(int(round(l[2] * 100)) for l in linhas))
+    if falta > 0 and linhas:
+        i = len(linhas) - 1
+        if not linhas[i][0] >= falta:
+            i = max(range(len(linhas)), key=lambda k: (linhas[k][0], k))
+        if linhas[i][0] >= falta:
+            subir(linhas[i], falta)
+    return (sum(int(round(l[2] * 100)) for l in linhas) - antes) / 100
+
+
 def reais(valor):
     """1234.5 -> '1.234,50' (texto do caixa)."""
     return f"{valor:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
@@ -156,6 +185,8 @@ class OperationService:
             if not (0 <= iof_base <= 10 and 0 <= iof_diario <= 1):
                 raise ValueError("IOF inválido")
 
+            # 1o a conta de todos os cheques, depois o pagamento sem centavos (mexe em um cheque so)
+            contas = []
             for n, item in enumerate(data['checks'], 1):
                 valor_face = float(item['valor'])
                 if not valor_face > 0:
@@ -163,9 +194,12 @@ class OperationService:
                 vencimento = item['vencimento']
                 venc = datetime.strptime(vencimento, '%Y-%m-%d').date() if isinstance(vencimento, str) else vencimento
                 dias = (venc - new_operation.operation_date).days + dias_comp
+                contas.append([*calcular_linha(valor_face, dias, new_operation.monthly_rate,
+                                               iof_ativo, iof_base, iof_diario), valor_face, venc, dias])
+            arredondar_pagamento(contas)
 
-                juros, iof, liquido = calcular_linha(valor_face, dias, new_operation.monthly_rate,
-                                                     iof_ativo, iof_base, iof_diario)
+            for n, (item, (juros, iof, liquido, valor_face, venc, dias)) in enumerate(zip(data['checks'], contas), 1):
+                vencimento = venc
                 # A tela manda o que mostrou. Tem que bater com a conta daqui (1 centavo de
                 # folga so para o arredondamento de ponto flutuante JS x Python) - e ai grava
                 # EXATAMENTE o que a tela mostrou, centavo por centavo.
