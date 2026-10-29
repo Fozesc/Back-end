@@ -218,7 +218,7 @@ def main():
                     "arquivo": f"{nome.lower()}-banco-{quando:%Y-%m-%d}.sql.gz.enc", "dados": cifrar(f.read(), senha),
                     "tipo": ("application", "octet-stream"), "curto": "cópia do banco",
                     "texto": ["Cópia de segurança do banco de dados",
-                              f"   O sistema inteiro em {quando:%d/%m/%Y às %H:%M}. Serve para restaurar o sistema; não precisa abrir."]})
+                              f"   O sistema inteiro em {quando:%d/%m/%Y às %H:%M}"]})
         else:
             problemas.append("Não encontrei a cópia do banco.")
 
@@ -233,15 +233,13 @@ def main():
     linhas = [f"Backup da {nome} de {hoje:%d/%m/%Y}.", ""]
     if problemas:
         linhas += ["ATENÇÃO:", *[f"  - {p}" for p in problemas], ""]
+    # Só informa o que foi (pedido de 28/10/2026): sem explicação. No e-mail que leva o banco (só para quem
+    # foi marcado) vai o comando de abrir, para daqui a anos ainda saber como.
     for anexo in anexos:
         linhas += [*anexo["texto"], ""]
-    if anexos:
-        linhas.append("Os arquivos abrem com a senha do backup.")
-    # Só no e-mail que leva o banco (vai só para quem foi marcado): daqui a anos, o jeito de abrir está aqui.
     banco = next((a["arquivo"] for a in anexos if a["arquivo"].endswith(".sql.gz.enc")), None)
     if banco:
-        linhas += ["", "Para abrir a cópia do banco no Mac: abra o Terminal na pasta onde salvou o anexo e rode "
-                   "o comando abaixo (ele pede a senha do backup; \"bad decrypt\" é senha errada):",
+        linhas += ["", "Cópia do banco:",
                    f"  openssl enc -d {' '.join(CIFRA)} -in {banco} -out {banco.removesuffix('.enc')}"]
     linhas += ["", f"Mensagem automática do sistema {nome}."]
 

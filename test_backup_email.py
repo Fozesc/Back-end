@@ -251,6 +251,11 @@ def main():
         assert gzip.decompress(aberto) == dump, 'a copia do banco abre com a senha e e a mesma'
         comando = f"openssl enc -d {' '.join(e.CIFRA)} -in {banco} -out {banco.removesuffix('.enc')}"
         assert comando in msg.get_body().get_content(), 'quem recebe o banco recebe o jeito de abrir'
+        so_banco = f"Cópia de segurança do banco de dados\n   O sistema inteiro em "
+        corpo = msg.get_body().get_content()
+        assert so_banco in corpo and '\n\n\nCópia do banco:\n  openssl' in corpo, corpo
+        assert 'Serve para restaurar' not in corpo and 'Terminal' not in corpo and 'senha do backup' not in corpo, \
+            'o e-mail so informa, sem explicacao (pedido de 28/10/2026)'
 
         os.environ.update(BACKUP_EMAIL='socio@x.com', BACKUP_ARQUIVOS='planilha,relatorio', BACKUP_RELATORIO='')
         e.main()
