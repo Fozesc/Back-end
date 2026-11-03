@@ -52,3 +52,8 @@ planilha*
 Planilha*
 conferido*
 clientes_a_conferir*
+
+# contratos de clientes (dados pessoais): nunca vao para o GitHub
+teste-contratos/
+Contrato*.pdf
+contratos/*.pdf

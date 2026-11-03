@@ -2,7 +2,7 @@ from datetime import datetime
 import math
 import sys
 from app import db
-from app.utils.validacao import ler_data
+from app.utils.validacao import ler_data, ler_texto
 from app.models.domain import Operation, Check, Transaction, Client, CompanySettings
 from flask_jwt_extended import get_jwt
 from app.services.audit_service import AuditService
@@ -10,6 +10,8 @@ from sqlalchemy import asc, desc
 from sqlalchemy.orm import joinedload, selectinload
 
 MAX_POR_PAGINA = 100
+TIPOS_TITULO = ('CHEQUE', 'PROMISSORIA')
+EMPRESAS = ('Fozesc', 'PQ')
 BORDEROS_POR_PAGINA = 10      # ficha do cliente
 MAX_BORDEROS_POR_PAGINA = 50
 
@@ -122,6 +124,9 @@ class OperationService:
             if not (math.isfinite(taxa) and 0 <= taxa <= 100) or not 0 <= dias_comp <= 30:
                 raise ValueError("Taxa (0 a 100%) ou dias de compensação (0 a 30) inválidos")
             comissao = ler_comissao(data, taxa)
+            empresa = data.get('empresa') or 'Fozesc'
+            if empresa not in EMPRESAS:
+                raise ValueError("Empresa inválida (use Fozesc ou PQ)")
 
             new_operation = Operation(
                 client_id=data['client_id'],
@@ -132,6 +137,9 @@ class OperationService:
                 account_source=conta_origem,
                 notes=data.get('notes'),
                 comissao=comissao,
+                empresa=empresa,
+                avalista_nome=ler_texto(data.get('avalista_nome'), 'o avalista', 100),
+                avalista_documento=ler_texto(data.get('avalista_documento'), 'o CPF do avalista', 20),
                 total_face_value=0.0,
                 total_interest=0.0,
                 total_net_value=0.0
@@ -163,6 +171,8 @@ class OperationService:
                 if not valor_face > 0:
                     raise ValueError(f"Cheque {n}: o valor tem que ser maior que zero")
                 venc = ler_data(item.get('vencimento'), f'Cheque {n}: vencimento')
+                if (item.get('tipo') or 'CHEQUE') not in TIPOS_TITULO:
+                    raise ValueError(f"Título {n}: tipo inválido (use cheque ou promissória)")
                 dias = (venc - new_operation.operation_date).days + dias_comp
                 contas.append([*calcular_linha(valor_face, dias, new_operation.monthly_rate,
                                                iof_ativo, iof_base, iof_diario), valor_face, venc, dias])
@@ -188,6 +198,7 @@ class OperationService:
 
                 new_check = Check(
                     operation_id=new_operation.id,
+                    type=item.get('tipo') or 'CHEQUE',
                     bank=item.get('banco', ''),
                     number=item.get('num_doc', ''),
                     due_date=datetime.strptime(vencimento, '%Y-%m-%d').date() if isinstance(vencimento, str) else vencimento,
@@ -207,7 +218,7 @@ class OperationService:
                 acumulado_iof += iof
                 acumulado_liquido += liquido
                 
-                checks_audit_list.append(f"[{new_check.bank} R$ {new_check.amount:.2f}]")
+                checks_audit_list.append(f"[{'Promissória ' + (new_check.number or '') if new_check.type == 'PROMISSORIA' else new_check.bank} R$ {new_check.amount:.2f}]")
 
             new_operation.total_face_value = round(acumulado_face, 2)
             new_operation.total_interest = round(acumulado_juros, 2)
@@ -366,6 +377,43 @@ class OperationService:
             .paginate(page=page, per_page=per_page, max_per_page=MAX_BORDEROS_POR_PAGINA, error_out=False)
         return {'items': [self._serialize_with_checks(op) for op in pagina.items],
                 'total': pagina.total, 'pages': pagina.pages, 'page': pagina.page, 'per_page': pagina.per_page}
+
+    def documento(self, op_id):
+        """Tudo que o borderô em PDF e as promissorias precisam, como no dia do borderô: valor e
+        vencimento de origem (antes de prorrogacao ou pagamento parcial), empresa e avalista gravados."""
+        from app.services.check_service import TAG_IMPORT, descrever_saida, notas_limpas
+        op = db.session.get(Operation, op_id)
+        if not op:
+            return None
+        s = CompanySettings.query.first() or CompanySettings()
+        if op.empresa == 'PQ':
+            empresa = {'chave': 'PQ', 'nome': s.pq_nome or 'PQ', 'cnpj': s.pq_cnpj, 'endereco': s.pq_endereco}
+        else:
+            empresa = {'chave': 'Fozesc', 'nome': s.company_name or 'Fozesc', 'cnpj': s.cnpj, 'endereco': s.address}
+        c = op.client
+        endereco = ' - '.join(filter(None, [c.address, c.neighborhood, '/'.join(filter(None, [c.city, c.state])),
+                                            c.zip_code and f'CEP {c.zip_code}']))
+        iso = lambda d: d.strftime('%Y-%m-%d') if d else None
+        titulos = []
+        for t in sorted(op.checks, key=lambda t: t.id):
+            face = float(t.original_amount if t.original_amount is not None else t.amount or 0)
+            juros, liquido = float(t.interest_amount or 0), float(t.net_amount or 0)
+            titulos.append({'tipo': t.type or 'CHEQUE', 'numero': t.number or '', 'banco': t.bank or '',
+                            'emitente': t.issuer_name or '', 'vencimento': iso(t.original_due_date or t.due_date),
+                            'dias': t.days or 0, 'valor': round(face, 2), 'juros': round(juros, 2),
+                            'iof': round(max(face - juros - liquido, 0), 2), 'liquido': round(liquido, 2)})
+        return {
+            'id': op.id, 'data': iso(op.operation_date), 'empresa': empresa,
+            'cliente': {'nome': c.name, 'documento': c.document or '', 'telefone': c.phone or '', 'endereco': endereco},
+            'avalista': {'nome': op.avalista_nome or '', 'documento': op.avalista_documento or ''},
+            'taxa_mensal': float(op.monthly_rate or 0), 'dias_compensacao': op.compensation_days or 0,
+            'conta_saida': descrever_saida(op), 'observacao': notas_limpas(op),
+            'importado': TAG_IMPORT in (op.notes or ''),
+            'comissao': float(op.comissao or 0), 'comissao_valor': float(op.comissao_valor or 0),
+            'valor_total': float(op.total_face_value or 0), 'juros_total': float(op.total_interest or 0),
+            'iof_total': float(op.iof_amount or 0), 'liquido_total': float(op.total_net_value or 0),
+            'titulos': titulos,
+        }
 
     def _serialize_with_checks(self, op):
         return {

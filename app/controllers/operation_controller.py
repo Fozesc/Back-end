@@ -45,3 +45,13 @@ def get_by_client(client_id):
                                              request.args.get('per_page', 10, type=int)))
     except Exception:
         return jsonify({'error': 'Não foi possível carregar os borderôs do cliente'}), 500
+
+
+@bp.route('/<int:op_id>/documento', methods=['GET'])
+@jwt_required()
+def documento(op_id):
+    """Dados do borderô e das promissorias para baixar o PDF de novo (ficha do cliente, titulo, borderô)."""
+    dados = service.documento(op_id)
+    if dados is None:
+        return jsonify({'error': 'Borderô não encontrado'}), 404
+    return jsonify(dados)

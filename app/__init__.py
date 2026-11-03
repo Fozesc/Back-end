@@ -153,6 +153,12 @@ def create_app():
             'ALTER TABLE recorrentes ADD COLUMN IF NOT EXISTS pago_atual DOUBLE PRECISION NOT NULL DEFAULT 0',
             # botao 'Enviar agora' da aba Backups: o worker de backup atende o pedido
             'ALTER TABLE backup_config ADD COLUMN IF NOT EXISTS envio_pedido_em TIMESTAMP',
+            'ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS pq_nome VARCHAR(100)',
+            'ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS pq_cnpj VARCHAR(20)',
+            'ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS pq_endereco VARCHAR(200)',
+            'ALTER TABLE operations ADD COLUMN IF NOT EXISTS empresa VARCHAR(10)',
+            'ALTER TABLE operations ADD COLUMN IF NOT EXISTS avalista_nome VARCHAR(100)',
+            'ALTER TABLE operations ADD COLUMN IF NOT EXISTS avalista_documento VARCHAR(20)',
             # a auditoria so cresce e a tela sempre ordena/filtra por data: sem indice, cada
             # pagina ordenava a tabela inteira
             'CREATE INDEX IF NOT EXISTS ix_audit_logs_timestamp ON audit_logs (timestamp)',

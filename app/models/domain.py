@@ -14,6 +14,10 @@ class CompanySettings(db.Model):
     cnpj = db.Column(db.String(20))
     phone = db.Column(db.String(20))
     address = db.Column(db.String(200))
+    # 2a empresa (PQ), escolhida no topo do borderô: nome, CNPJ e endereco no borderô e na promissoria
+    pq_nome = db.Column(db.String(100))
+    pq_cnpj = db.Column(db.String(20))
+    pq_endereco = db.Column(db.String(200))
     
     # Taxas e Cálculos Padrão
     default_monthly_rate = db.Column(db.Float, default=4.0)       # Taxa Padrão Mensal
@@ -110,6 +114,11 @@ class Operation(db.Model):
     # (2 de 8% = 25% dos juros). Sai dos juros: nao muda juros, IOF nem o liquido do cliente.
     comissao = db.Column(db.Float, nullable=False, default=0.0, server_default=db.text('0'))
     comissao_valor = db.Column(db.Float, nullable=False, default=0.0, server_default=db.text('0'))
+    # empresa escolhida no topo do borderô (Fozesc ou PQ) e o avalista das promissorias: o borderô e as
+    # promissorias baixados depois (ficha do cliente, titulo) saem iguais aos do dia
+    empresa = db.Column(db.String(10))
+    avalista_nome = db.Column(db.String(100))
+    avalista_documento = db.Column(db.String(20))
     # cliente para operacao
     client = db.relationship('Client', backref=db.backref('operations', lazy=True))
 

@@ -21,6 +21,15 @@ def notas_limpas(op):
     return re.sub(r'\[' + TAG_IMPORT + r':[^\]]*\]\s*(Importado da planilha historica)?\s*\|?\s*',
                   '', (op.notes if op else '') or '').strip()
 
+def descrever_saida(op):
+    """De onde saiu o liquido; dividida em mais de uma conta: "Dinheiro R$ 5.000,00 + BB R$ 9.515,00"."""
+    saidas = Transaction.query.with_entities(Transaction.origin, Transaction.amount).filter(
+        Transaction.operation_id == op.id, Transaction.check_id.is_(None),
+        Transaction.category == 'Compra de Ativos').order_by(Transaction.id).all()
+    if len(saidas) > 1:
+        return ' + '.join(f"{(o or '').replace('Sistema (', '').rstrip(')')} R$ {reais(abs(v))}" for o, v in saidas)
+    return op.account_source
+
 # Campos que a edicao de cheque aceita mexer. Valor bruto, juros e liquido NAO estao
 # aqui de proposito: a regra do projeto e nunca recalcular/reescrever juros.
 CAMPOS_EDITAVEIS = ('emitente', 'vencimento', 'data_pagamento', 'data_operacao', 'observacao')
@@ -1227,14 +1236,7 @@ class CheckService:
         total_titulos = Check.query.filter_by(operation_id=op.id).count()
         abat = Transaction.query.with_entities(Transaction.vale_id, Transaction.amount).filter(
             Transaction.operation_id == op.id, Transaction.check_id.is_(None), Transaction.vale_id.isnot(None)).first()
-        # saida dividida em mais de uma conta: "Dinheiro R$ 5.000,00 + BB R$ 9.515,00"
-        saidas = Transaction.query.with_entities(Transaction.origin, Transaction.amount).filter(
-            Transaction.operation_id == op.id, Transaction.check_id.is_(None),
-            Transaction.category == 'Compra de Ativos').order_by(Transaction.id).all()
-        conta_saida = op.account_source
-        if len(saidas) > 1:
-            conta_saida = ' + '.join(f"{(o or '').replace('Sistema (', '').rstrip(')')} R$ {reais(abs(v))}"
-                                     for o, v in saidas)
+        conta_saida = descrever_saida(op)
         return {
             **self._serialize_check(c),
             'bordero': {
