@@ -314,6 +314,21 @@ class Folha(db.Model):
         return {'id': self.id, 'titulo': self.titulo, 'conteudo': self.conteudo}
 
 
+# --- GUIAS ---
+# Passo a passo de cada tarefa, com os sites e as anotacoes. Um guia pode ter outros dentro
+# (pai_id), como uma playlist. Guia com outros dentro nao se apaga. notas: [{tipo, titulo, texto}]
+class Guia(db.Model):
+    __tablename__ = 'guias'
+    id = db.Column(db.Integer, primary_key=True)
+    pai_id = db.Column(db.Integer, db.ForeignKey('guias.id', ondelete='RESTRICT'), index=True)
+    titulo = db.Column(db.String(120), nullable=False)
+    links = db.Column(db.JSON, nullable=False, default=list)
+    passos = db.Column(db.JSON, nullable=False, default=list)
+    notas = db.Column(db.JSON, nullable=False, default=list)
+    atualizado_por = db.Column(db.String(100))
+    atualizado_em = db.Column(db.DateTime, nullable=False, default=datetime.now)
+
+
 # --- DESPESA RECORRENTE ---
 # Conta que se repete (aluguel, luz, internet). `automatico` = debito automatico: lanca
 # sozinha no caixa no vencimento, da `conta` do cadastro. Manual: fica aguardando alguem

@@ -154,11 +154,13 @@ def main():
         assert r.status_code == 200 and r.get_json()['descricao'] == 'aporte do sócio', 'so a descricao nao pede senha'
         for mudanca in ({'valor': 0.01}, {'tipo': 'saida'}, {'origem': 'BB'}, {'data': (HOJE - timedelta(days=3)).isoformat()}):
             r = http.put(f'{T}/{tid}', headers=op, json={'valor': 100, 'tipo': 'entrada', **mudanca})
-            assert r.status_code == 403, (mudanca, r.data)
+            assert r.status_code == 403 and 'Ctrl+Shift+R' in r.get_json()['error'], (mudanca, r.data)
+        r = http.put(f'{T}/{tid}', headers=op, json={'valor': 1, 'tipo': 'entrada', 'senha': 'errada'})
+        assert r.status_code == 403 and r.get_json()['error'].startswith('Senha incorreta'), r.data
         with app.app_context():
             t = db.session.get(Transaction, tid)
             assert (t.amount, t.type, t.origin, t.date) == (100, 'entrada', 'Dinheiro', HOJE), 'senha errada nao muda nada'
-            assert AuditLog.query.filter_by(action='NEGADO', target='FluxoCaixa').count() == 4
+            assert AuditLog.query.filter_by(action='NEGADO', target='FluxoCaixa').count() == 5
         r = http.put(f'{T}/{tid}', headers=op, json={'valor': 80, 'tipo': 'entrada', 'senha': SENHA})
         assert r.status_code == 200 and r.get_json()['valor'] == 80
 
@@ -206,7 +208,7 @@ def main():
         erros = 0
         tentativas = [('delete', f'{T}/{tid}', {'senha': 'errada'}),
                       ('put', f'{T}/{tid}', {'valor': 1, 'tipo': 'entrada', 'senha': 'errada'})]
-        # as 4 senhas erradas do bloco 5 ja contaram
+        # as 5 senhas erradas do bloco 5 ja contaram
         while True:
             metodo, url, corpo = tentativas[erros % 2]
             r = getattr(http, metodo)(url, headers=op, json=corpo)
@@ -215,7 +217,7 @@ def main():
             assert r.status_code == 403, r.data
             erros += 1
             assert erros < 20, 'nao travou'
-        assert erros + 4 == 10, f'travou depois de {erros + 4} erros (esperado 10)'
+        assert erros + 5 == 10, f'travou depois de {erros + 5} erros (esperado 10)'
         assert 'senhas erradas' in r.get_json()['error'], r.data
         r = http.put(f'{T}/{tid}', headers=op, json={'valor': 70, 'tipo': 'entrada', 'senha': SENHA})
         assert r.status_code == 429, 'travado vale ate para a senha certa'

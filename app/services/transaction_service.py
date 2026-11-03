@@ -299,6 +299,11 @@ class TransactionService:
             if not usuario or not check_password_hash(usuario.password_hash, str(data.get('senha') or '')):
                 self.audit.log_action(self._get_current_user(), 'NEGADO', 'FluxoCaixa',
                                       f"Senha incorreta ao tentar editar o lançamento #{id}: {t.description} (R$ {t.amount})")
+                # sem senha nenhuma = tela velha aberta desde antes da 2.11.3, que nao tem o campo
+                if not data.get('senha'):
+                    raise PermissionError("Para mudar o valor, a conta ou a data é preciso digitar a sua senha. "
+                                          "Se o campo de senha não aparece, a tela está desatualizada: aperte "
+                                          "Ctrl+Shift+R (no Mac, Cmd+Shift+R) e tente de novo.")
                 raise PermissionError("Senha incorreta - o lançamento não foi alterado")
         antiga = f"{t.description} | R$ {t.amount} | {t.type} | {t.origin} | {t.date:%d/%m/%Y}"
         t.date = nova_data
