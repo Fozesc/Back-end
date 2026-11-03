@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 from app.models.domain import AuditLog, BackupConfig, CompanySettings, User
 from app import db
+from app.utils.validacao import ler_numero, ler_texto
 from app.services.audit_service import AuditService
 from flask_jwt_extended import get_jwt, get_jwt_identity
 from werkzeug.security import check_password_hash
@@ -43,49 +44,44 @@ class SettingsService:
         
         return self._serialize(settings)
 
+    # campo da tela -> (rotulo, coluna, como ler). Antes gravava o que viesse: texto na taxa dava
+    # erro 500, "NaN" ia para o banco, campo apagado travava o salvar.
+    CAMPOS = {
+        'nomeEmpresa': ('Nome', 'company_name', lambda v: ler_texto(v, 'o nome da empresa', 100, obrigatorio=True)),
+        'cnpj': ('CNPJ', 'cnpj', lambda v: ler_texto(v, 'o CNPJ', 20)),
+        'telefone': ('Telefone', 'phone', lambda v: ler_texto(v, 'o telefone', 20)),
+        'endereco': ('Endereço', 'address', lambda v: ler_texto(v, 'o endereço', 200)),
+        'taxaPadrao': ('Taxa Mensal', 'default_monthly_rate', lambda v: ler_numero(v, 'Taxa padrão', 0, 100, 4)),
+        'diasCompensacaoPadrao': ('Dias Comp.', 'default_compensation_days',
+                                  lambda v: int(ler_numero(v, 'Dias de compensação', 0, 30, 0))),
+        'iof_rate': ('IOF', 'iof_rate', lambda v: ler_numero(v, 'IOF', 0, 10, 4)),
+        'iof_daily_rate': ('IOF Diário', 'iof_daily_rate', lambda v: ler_numero(v, 'IOF diário', 0, 1, 6)),
+        'extension_rate': ('Juros Prorrogação', 'extension_rate', lambda v: ler_numero(v, 'Taxa de prorrogação', 0, 100, 4)),
+        'fine_rate': ('Multa Devolução', 'fine_rate', lambda v: ler_numero(v, 'Multa de devolução', 0, 100, 4)),
+    }
+
     def update_settings(self, data):
+        if not isinstance(data, dict):
+            raise ValueError('Dados inválidos')
+        # le e confere TUDO antes de mexer: um campo ruim nao deixa os outros meio gravados
+        novos = {chave: (rotulo, coluna, ler(data[chave]))
+                 for chave, (rotulo, coluna, ler) in self.CAMPOS.items() if chave in data}
+
         settings = CompanySettings.query.first()
         if not settings:
             settings = CompanySettings()
             db.session.add(settings)
-       
-       
+
         mudancas = []
-
-   
-        campos = {
-            'nomeEmpresa': ('Nome', 'company_name'),
-            'cnpj': ('CNPJ', 'cnpj'),
-            'telefone': ('Telefone', 'phone'),
-            'endereco': ('Endereço', 'address'),
-            'taxaPadrao': ('Taxa Mensal', 'default_monthly_rate'),
-            'diasCompensacaoPadrao': ('Dias Comp.', 'default_compensation_days'),
-            'iof_rate': ('IOF', 'iof_rate'),
-            'iof_daily_rate': ('IOF Diário', 'iof_daily_rate'),
-            'extension_rate': ('Juros Prorrogação', 'extension_rate'),
-            'fine_rate': ('Multa Devolução', 'fine_rate')
-        }
-
-        for chave_json, (label, atributo) in campos.items():
-            if chave_json in data:
-                valor_novo = data[chave_json]
-                valor_antigo = getattr(settings, atributo)
-
-             
-                if isinstance(valor_antigo, float): valor_novo = float(valor_novo)
-                if isinstance(valor_antigo, int): valor_novo = int(valor_novo)
-
-                if valor_novo != valor_antigo:
-                    mudancas.append(f"{label}: {valor_antigo} -> {valor_novo}")
-                    setattr(settings, atributo, valor_novo)
-
+        for rotulo, coluna, valor_novo in novos.values():
+            valor_antigo = getattr(settings, coluna)
+            if valor_novo != valor_antigo:
+                mudancas.append(f"{rotulo}: {valor_antigo} -> {valor_novo}")
+                setattr(settings, coluna, valor_novo)
         db.session.commit()
 
-   
         if mudancas:
-            resumo = "Alterou: " + " | ".join(mudancas)
-            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Configuracao', resumo)
-        
+            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Configuracao', "Alterou: " + " | ".join(mudancas))
         return self._serialize(settings)
 
     def _serialize(self, s):

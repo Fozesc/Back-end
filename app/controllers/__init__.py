@@ -3,6 +3,19 @@ from flask import jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
 
+# Confirmacoes por senha (apagar/editar no caixa, editar/apagar titulo, prorrogar com ajuste,
+# juntar clientes, vales, backup): os erros contam JUNTOS, por IP, e so a senha errada (403)
+# conta. Sem isso, num computador deixado aberto dava para tentar a senha a vontade.
+LIMITE_SENHA = '10 per minute;30 per hour'
+
+
+def limite_senha(rota):
+    from app import limiter
+    return limiter.shared_limit(LIMITE_SENHA, scope='confirmacao-senha',
+                                deduct_when=lambda resposta: resposta.status_code == 403,
+                                error_message='Muitas senhas erradas. Espere alguns minutos e tente de novo.')(rota)
+
+
 def so_admin(rota):
     """Rota so para Admin. Confere o cargo no BANCO, nao no token: quem perdeu o cargo perde
     o acesso na hora, sem esperar o login vencer."""

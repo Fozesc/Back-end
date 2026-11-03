@@ -2,6 +2,8 @@ from flask import Blueprint, jsonify, request
 from app import db
 from app.services.client_service import ClientService
 from flask_jwt_extended import jwt_required
+from app.controllers import limite_senha
+
 bp = Blueprint('clients', __name__, url_prefix='/api/clients')
 service = ClientService()
 
@@ -34,21 +36,28 @@ def show(id):
 @bp.route('', methods=['POST'])
 @jwt_required()
 def create():
-    client = service.create(request.json)
+    try:
+        client = service.create(request.get_json(silent=True) or {})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     return jsonify({'id': client.id, 'message': 'Criado com sucesso'}), 201
 
 @bp.route('/<int:id>', methods=['PUT'])
 @jwt_required()
 def update(id):
-    client = service.update(id, request.json)
+    try:
+        client = service.update(id, request.get_json(silent=True) or {})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     if client: return jsonify({'message': 'Atualizado'})
-    return jsonify({'error': 'Erro ao atualizar'}), 400
+    return jsonify({'error': 'Cliente não encontrado'}), 404
 
 @bp.route('/merge', methods=['POST'])
+@limite_senha
 @jwt_required()
 def merge():
     """Junta dois cadastros do mesmo cliente. Exige a senha de quem esta logado."""
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     try:
         origem = int(data.get('origem_id'))
         destino = int(data.get('destino_id'))
@@ -92,6 +101,8 @@ def criar_nota(id):
 def editar_nota(id, nota_id):
     try:
         nota = service.editar_nota(id, nota_id, request.get_json(silent=True))
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
     except ValueError as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 400
@@ -103,6 +114,10 @@ def editar_nota(id, nota_id):
 @bp.route('/<int:id>/notas/<int:nota_id>', methods=['DELETE'])
 @jwt_required()
 def apagar_nota(id, nota_id):
-    if not service.apagar_nota(id, nota_id):
+    try:
+        apagou = service.apagar_nota(id, nota_id)
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    if not apagou:
         return jsonify({'error': 'Nota não encontrada'}), 404
     return '', 204

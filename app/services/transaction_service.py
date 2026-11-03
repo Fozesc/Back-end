@@ -7,6 +7,7 @@ from sqlalchemy import func, case, or_
 from datetime import datetime, date
 from werkzeug.security import check_password_hash
 from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
+from app.utils.validacao import ler_data, ler_numero
 
 TIPOS = ('entrada', 'saida')
 MAX_POR_PAGINA = 100
@@ -23,12 +24,9 @@ def _valor(bruto):
 
 
 def _data(bruto):
-    if not isinstance(bruto, str):
+    if bruto is None:
         return bruto
-    try:
-        return datetime.strptime(bruto[:10], '%Y-%m-%d').date()
-    except ValueError:
-        raise ValueError('Data inválida')
+    return ler_data(bruto)
 
 
 class TransactionService:
@@ -78,25 +76,27 @@ class TransactionService:
         Esta função grava na tabela CompanySettings os valores que servirão 
         de base para todo o cálculo do fluxo de caixa.
         """
+        if not isinstance(data, dict):
+            raise ValueError('Dados inválidos')
+        campos = {'capital_social': 'Capital social', 'saldo_inicial_bb': 'Saldo inicial do BB',
+                  'saldo_inicial_ce': 'Saldo inicial da Caixa', 'saldo_inicial_caixa': 'Saldo inicial do dinheiro'}
+        # confere tudo antes de gravar: texto, NaN ou Infinity sao recusados (capital negativo tambem;
+        # saldo inicial de banco pode comecar negativo)
+        novos = {c: ler_numero(data[c], nome, 0 if c == 'capital_social' else -10_000_000_000, 10_000_000_000)
+                 for c, nome in campos.items() if c in data}
         try:
             settings = CompanySettings.query.first()
             if not settings:
                 settings = CompanySettings()
                 db.session.add(settings)
-
-
-            if 'capital_social' in data:
-                settings.capital_social = float(data.get('capital_social', 0))
-            if 'saldo_inicial_bb' in data:
-                settings.saldo_inicial_bb = float(data.get('saldo_inicial_bb', 0))
-            if 'saldo_inicial_ce' in data:
-                settings.saldo_inicial_ce = float(data.get('saldo_inicial_ce', 0))
-            if 'saldo_inicial_caixa' in data:
-                settings.saldo_inicial_caixa = float(data.get('saldo_inicial_caixa', 0))
+            antes = {c: getattr(settings, c) for c in novos}
+            for campo, valor in novos.items():
+                setattr(settings, campo, valor)
 
             db.session.commit()
             
-            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Configuracao', "Atualizou saldos iniciais do caixa")
+            self.audit.log_action(self._get_current_user(), 'UPDATE', 'Configuracao', "Atualizou saldos iniciais do caixa: "
+                                  + " | ".join(f"{campos[c]}: {antes[c]} -> {v}" for c, v in novos.items()))
             return True
         except Exception as e:
             db.session.rollback()
@@ -110,8 +110,10 @@ class TransactionService:
         from app.models.domain import CompanySettings, Transaction, Check
         from sqlalchemy import func, case
         
-        settings = CompanySettings.query.first()
-        
+        # banco novo ou recem-restaurado ainda sem a linha de configuracoes: vale tudo zero (antes
+        # a tela do caixa quebrava ate alguem salvar os Ajustes)
+        settings = CompanySettings.query.first() or CompanySettings()
+
         # 1. Capital Social (Para controle de crescimento/porcentagem)
         capital_base = float(settings.capital_social or 0)
 
@@ -247,10 +249,7 @@ class TransactionService:
         if entra == sai:
             raise ValueError('A troca precisa de duas contas diferentes')
         desc = str(data.get('descricao') or '').strip()[:200] or 'Troca'
-        try:
-            dt = datetime.strptime(str(data.get('data') or date.today())[:10], '%Y-%m-%d').date()
-        except ValueError:
-            raise ValueError('Data inválida')
+        dt = ler_data(data.get('data') or date.today())
 
         saida = Transaction(date=dt, description=desc, amount=-valor, type='saida',
                             origin=sai, category='Troca')
@@ -277,10 +276,6 @@ class TransactionService:
         if t.valor_informativo is not None:
             raise ValueError('Linha só informativa (não mexe no saldo): não dá para editar')
         
-        # --- ADICIONE ESTAS DUAS LINHAS AQUI ---
-        antiga_desc = t.description
-        antigo_valor = t.amount
-        # ---------------------------------------
 
         # linha de borderô, titulo ou vale: valor e tipo so mudam pela tela de origem, senao
         # o caixa deixa de bater com ela. Descricao, data e conta podem mudar aqui.
@@ -294,8 +289,19 @@ class TransactionService:
             raise ValueError(f"Este lançamento vem de: {vinculo}. O valor e o tipo só mudam pela tela de "
                              f"origem; aqui dá para mudar descrição, data e conta.")
 
-        if 'date' in data or 'data' in data:
-            t.date = _data(data.get('date') or data.get('data'))
+        nova_data = _data(data.get('date') or data.get('data')) if ('date' in data or 'data' in data) else t.date
+        nova_conta = conta_padrao(data.get('origin') or data.get('origem')) if (data.get('origin') or data.get('origem')) else t.origin
+        # mexer no dinheiro (valor, entrada/saida, conta ou data) pede a senha, como apagar: trocar o
+        # valor para centavos era o mesmo que apagar sem senha. So descricao/categoria nao pede.
+        mexe = (abs(valor - abs(t.amount)) > 0.005 or tipo != t.type or nova_data != t.date or nova_conta != t.origin)
+        if mexe:
+            usuario = self._usuario_logado()
+            if not usuario or not check_password_hash(usuario.password_hash, str(data.get('senha') or '')):
+                self.audit.log_action(self._get_current_user(), 'NEGADO', 'FluxoCaixa',
+                                      f"Senha incorreta ao tentar editar o lançamento #{id}: {t.description} (R$ {t.amount})")
+                raise PermissionError("Senha incorreta - o lançamento não foi alterado")
+        antiga = f"{t.description} | R$ {t.amount} | {t.type} | {t.origin} | {t.date:%d/%m/%Y}"
+        t.date = nova_data
 
         if 'description' in data: t.description = str(data['description'] or '').strip()[:200] or t.description
         elif 'descricao' in data: t.description = str(data['descricao'] or '').strip()[:200] or t.description
@@ -304,8 +310,7 @@ class TransactionService:
             t.type = tipo
             t.amount = valor if tipo == 'entrada' else -valor
         
-        if 'origin' in data: t.origin = conta_padrao(data['origin'])
-        elif 'origem' in data: t.origin = conta_padrao(data['origem'])
+        t.origin = nova_conta
 
         par = self._par_da_troca(t)
         if par:
@@ -319,8 +324,9 @@ class TransactionService:
         db.session.commit()
         
         # Agora o log vai funcionar porque as variáveis existem!
-        self.audit.log_action(self._get_current_user(), 'UPDATE', 'FluxoCaixa', 
-                             f"Editou lançamento #{id}: {antiga_desc} (R$ {antigo_valor}) -> {t.description} (R$ {t.amount})")
+        self.audit.log_action(self._get_current_user(), 'UPDATE', 'FluxoCaixa',
+                              f"Editou lançamento #{id}: {antiga} -> {t.description} | R$ {t.amount} | {t.type} | "
+                              f"{t.origin} | {t.date:%d/%m/%Y}")
         return self._serialize(t)
     
     def delete(self, id, senha=None):

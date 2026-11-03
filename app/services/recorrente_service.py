@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func
 
 from app import db
+from app.utils.validacao import ler_data
 from app.models.domain import Recorrente, Transaction
 from app.services.audit_service import AuditService
 from app.services.check_service import CheckService
@@ -60,10 +61,7 @@ def _valor(bruto):
 
 
 def _data(bruto, campo):
-    try:
-        return datetime.strptime(str(bruto)[:10], '%Y-%m-%d').date()
-    except (TypeError, ValueError):
-        raise ValueError(f'{campo} inválida')
+    return ler_data(bruto, campo)
 
 
 def _conta(bruto):

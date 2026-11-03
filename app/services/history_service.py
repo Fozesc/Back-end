@@ -1,6 +1,7 @@
 import calendar
 from datetime import date
 from app import db
+from app.utils.validacao import ANO_MIN, ANO_MAX
 from app.models.domain import Transaction, Operation, Check
 from sqlalchemy import func, case, extract, and_
 
@@ -117,11 +118,14 @@ class HistoryService:
     def lucro_historico(self):
         """Todos os meses, do primeiro ao ultimo com movimento (mes sem nada aparece com zero,
         para o grafico nao pular meses)."""
-        meses = self.lucro_por_mes()
+        # data digitada errada que ja esteja no banco (ano 1902, 2206) nao pode virar seculos de
+        # meses vazios no grafico: so 2000 a 2100, no maximo os ultimos 50 anos
+        meses = {k: v for k, v in self.lucro_por_mes().items() if f"{ANO_MIN}-01" <= k <= f"{ANO_MAX}-12"}
         if not meses:
             return []
-        ano, mes = map(int, min(meses).split('-'))
         ultimo = max(meses)
+        ano_final, mes_final = map(int, ultimo.split('-'))
+        ano, mes = map(int, max(min(meses), f"{ano_final - 50:04d}-{mes_final:02d}").split('-'))
         saida = []
         while f"{ano:04d}-{mes:02d}" <= ultimo:
             chave = f"{ano:04d}-{mes:02d}"

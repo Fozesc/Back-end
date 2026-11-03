@@ -2,6 +2,7 @@ from datetime import datetime
 import math
 import sys
 from app import db
+from app.utils.validacao import ler_data
 from app.models.domain import Operation, Check, Transaction, Client, CompanySettings
 from flask_jwt_extended import get_jwt
 from app.services.audit_service import AuditService
@@ -32,35 +33,6 @@ def calcular_linha(valor_face, dias, taxa_mensal, iof_ativo=False, iof_base=0.0,
     if iof_ativo:
         iof = arredondar(valor_face * (float(iof_base) / 100) + valor_face * (float(iof_diario) / 100) * dias)
     return juros, iof, arredondar(valor_face - juros - iof)
-
-
-def _falta_para_o_real(centavos):
-    return (-(-centavos // 100) * 100 - centavos) / 100
-
-
-def arredondar_pagamento(linhas):
-    """Igual ao arredondarPagamento() da tela (versao 2.11.1): o liquido de CADA cheque sobe para
-    o proximo real e o que falta sai dos juros do proprio cheque; cheque sem juros para isso fica
-    como esta e, se o total ainda sobrar centavo, ele sai dos juros do ultimo cheque que der (senao
-    o de mais juros). `linhas` = [[juros, iof, liquido, ...], ...], alterado no lugar. Devolve
-    quanto o total subiu."""
-    def subir(linha, falta):
-        linha[0] = arredondar(linha[0] - falta)
-        linha[2] = arredondar(linha[2] + falta)
-
-    antes = sum(int(round(l[2] * 100)) for l in linhas)
-    for linha in linhas:
-        falta = _falta_para_o_real(int(round(linha[2] * 100)))
-        if falta > 0 and linha[0] >= falta:
-            subir(linha, falta)
-    falta = _falta_para_o_real(sum(int(round(l[2] * 100)) for l in linhas))
-    if falta > 0 and linhas:
-        i = len(linhas) - 1
-        if not linhas[i][0] >= falta:
-            i = max(range(len(linhas)), key=lambda k: (linhas[k][0], k))
-        if linhas[i][0] >= falta:
-            subir(linhas[i], falta)
-    return (sum(int(round(l[2] * 100)) for l in linhas) - antes) / 100
 
 
 def reais(valor):
@@ -135,9 +107,7 @@ class OperationService:
             if not data.get('checks'):
                 raise ValueError("Borderô sem cheques")
 
-            op_date = data.get('operation_date', datetime.now().date())
-            if isinstance(op_date, str):
-                op_date = datetime.strptime(op_date, '%Y-%m-%d').date()
+            op_date = ler_data(data.get('operation_date') or datetime.now().date(), 'Data da operação')
 
             conta_origem = data.get('account_source') or 'Dinheiro'
             if conta_origem not in ('Dinheiro', 'BB', 'Caixa'):
@@ -185,18 +155,17 @@ class OperationService:
             if not (0 <= iof_base <= 10 and 0 <= iof_diario <= 1):
                 raise ValueError("IOF inválido")
 
-            # 1o a conta de todos os cheques, depois o pagamento sem centavos (mexe em um cheque so)
+            # 1o a conta de todos os cheques, depois grava (o valor redondo da parcela vem da tela,
+            # no gerador de parcelas; juros e liquido sao sempre a conta exata)
             contas = []
             for n, item in enumerate(data['checks'], 1):
                 valor_face = float(item['valor'])
                 if not valor_face > 0:
                     raise ValueError(f"Cheque {n}: o valor tem que ser maior que zero")
-                vencimento = item['vencimento']
-                venc = datetime.strptime(vencimento, '%Y-%m-%d').date() if isinstance(vencimento, str) else vencimento
+                venc = ler_data(item.get('vencimento'), f'Cheque {n}: vencimento')
                 dias = (venc - new_operation.operation_date).days + dias_comp
                 contas.append([*calcular_linha(valor_face, dias, new_operation.monthly_rate,
                                                iof_ativo, iof_base, iof_diario), valor_face, venc, dias])
-            arredondar_pagamento(contas)
 
             for n, (item, (juros, iof, liquido, valor_face, venc, dias)) in enumerate(zip(data['checks'], contas), 1):
                 vencimento = venc

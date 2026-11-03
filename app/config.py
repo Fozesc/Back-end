@@ -31,9 +31,9 @@ class Config:
 
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # Tempo de expiração do login: um dia de trabalho. Computador esquecido aberto não fica
-    # com acesso a semana inteira.
-    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=12)
+    # Tempo de expiração do login: um dia de trabalho com folga (15h, pedido de 03/11/2026).
+    # Computador esquecido aberto não fica com acesso a semana inteira.
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=15)
 
     if not SQLALCHEMY_DATABASE_URI:
         raise ValueError(

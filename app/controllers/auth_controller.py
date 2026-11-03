@@ -1,3 +1,4 @@
+import re
 from flask import Blueprint, request, jsonify
 from app.services.auth_service import AuthService
 from app.services.audit_service import AuditService
@@ -9,6 +10,9 @@ from app import db, limiter
 # por IP (o nginx manda o IP real) e so conta a senha ERRADA: ninguem fica testando senha a
 # vontade, e o escritorio entrando normal nunca esbarra
 LIMITE_LOGIN = '10 per minute;30 per hour'
+# so grava na auditoria o que parece e-mail: se a pessoa digitou a senha no campo do e-mail,
+# a senha nao fica gravada
+EMAIL = re.compile(r'[^@\s]{1,64}@[^@\s]+\.[^@\s]+')
 
 bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 service = AuthService()
@@ -51,7 +55,9 @@ def login():
             user_name='Desconhecido',
             action='NEGADO',
             target='Login',
-            description=f'Tentativa de login com senha errada ou usuário inexistente: {str(email)[:100]}'
+            description='Tentativa de login com senha errada ou usuário inexistente: '
+                        + (str(email).strip()[:100] if EMAIL.fullmatch(str(email).strip()) else
+                           '(o texto digitado não é um e-mail - não foi gravado)')
         )
         return jsonify({'error': 'Credenciais inválidas'}), 401
     

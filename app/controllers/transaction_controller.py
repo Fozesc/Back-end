@@ -1,6 +1,9 @@
 from flask import Blueprint, jsonify, request
 from app.services.transaction_service import TransactionService
 from flask_jwt_extended import jwt_required
+from app.controllers import so_admin
+
+from app.controllers import limite_senha
 
 bp = Blueprint('transactions', __name__, url_prefix='/api/transactions')
 service = TransactionService()
@@ -40,11 +43,13 @@ def create_troca():
 
 # --- ROTA QUE ESTAVA FALTANDO PARA EDITAR LANÇAMENTO ---
 @bp.route('/<int:id>', methods=['PUT'])
+@limite_senha
 @jwt_required()
 def update_transaction(id):
-    data = request.get_json()
     try:
-        result = service.update(id, data)
+        result = service.update(id, request.get_json(silent=True) or {})
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     if result:
@@ -53,14 +58,19 @@ def update_transaction(id):
 
 # --- ROTA DE SALDOS INICIAIS (MANTIDA) ---
 @bp.route('/initial-balances', methods=['PUT'])
-@jwt_required()
+@so_admin
 def update_initial_balances():
-    data = request.get_json()
-    if service.update_initial_balances(data):
+    """Capital social e saldos iniciais: mudam todos os saldos, so o Admin."""
+    try:
+        ok = service.update_initial_balances(request.get_json(silent=True) or {})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if ok:
         return jsonify({"message": "Saldos iniciais salvos com sucesso"}), 200
     return jsonify({"error": "Falha ao salvar saldos"}), 400
 
 @bp.route('/<int:id>', methods=['DELETE'])
+@limite_senha
 @jwt_required()
 def delete(id):
     """Apaga lancamento do caixa. Exige a senha de quem esta logado no corpo."""

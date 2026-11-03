@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func, case
 from sqlalchemy.orm import joinedload
 from app import db
+from app.utils.validacao import ler_data
 from app.models.domain import Check, Client, Evento, Operation, Transaction
 from app.services.audit_service import AuditService
 
@@ -26,10 +27,7 @@ def _usuario():
 
 
 def _dia(texto, campo='Data'):
-    try:
-        return datetime.strptime(str(texto)[:10], '%Y-%m-%d').date()
-    except (TypeError, ValueError):
-        raise ValueError(f'{campo} inválida (use AAAA-MM-DD)')
+    return ler_data(texto, campo)
 
 
 def _serialize_evento(e):

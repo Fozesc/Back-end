@@ -92,11 +92,8 @@ def main():
         r = bordero([(1000, D(30), 'Banco do Brasil'), (500, D(-10), 'Caixa')], data=D(-40))
         assert r.status_code == 201, r.data
         op1 = r.get_json()['id']
-        from app.services.operation_service import arredondar_pagamento, calcular_linha
-        linhas_op1 = [list(calcular_linha(1000, 70, 4)), list(calcular_linha(500, 30, 4))]
-        arredondar_pagamento(linhas_op1)   # desde a 2.11.1 o pagamento do cliente nao tem centavos
-        saida_op1 = round(linhas_op1[0][2] + linhas_op1[1][2], 2)
-        assert saida_op1 == int(saida_op1), saida_op1
+        from app.services.operation_service import calcular_linha
+        saida_op1 = round(calcular_linha(1000, 70, 4)[2] + calcular_linha(500, 30, 4)[2], 2)
 
         # ------------------------------------------------ emprestado por origem
         na_rua = saldos()['na_rua']
@@ -137,9 +134,14 @@ def main():
         assert r.status_code == 400, r.data
         r = http.put(f'/api/transactions/{id_saida}', headers=cab,
                      json={'descricao': 'Pgto Borderô corrigido', 'valor': -valor_saida, 'tipo': 'saida', 'origem': 'Caixa'})
+        assert r.status_code == 403, 'mudar a conta pede a senha (2.11.3)'
+        r = http.put(f'/api/transactions/{id_saida}', headers=cab,
+                     json={'descricao': 'Pgto Borderô corrigido', 'valor': -valor_saida, 'tipo': 'saida', 'origem': 'Caixa',
+                           'senha': SENHA})
         assert r.status_code == 200 and r.get_json()['origem'] == 'Caixa', 'descricao/conta mudam'
         assert http.put(f'/api/transactions/{id_aporte}', headers=cab, json={'valor': 'NaN'}).status_code == 400
-        assert http.put(f'/api/transactions/{id_aporte}', headers=cab, json={'valor': 400, 'tipo': 'entrada'}).status_code == 200
+        assert http.put(f'/api/transactions/{id_aporte}', headers=cab,
+                        json={'valor': 400, 'tipo': 'entrada', 'senha': SENHA}).status_code == 200
         assert saldos()['bruto']['bb_total'] == 350, 'lancamento a mao muda o valor normalmente'
 
         # ------------------------------------------------ editar a data do borderô / do pagamento

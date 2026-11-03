@@ -2,6 +2,8 @@ from flask import Blueprint, request, jsonify
 from app.services.check_service import CheckService
 from flask_jwt_extended import jwt_required
 
+from app.controllers import limite_senha
+
 bp = Blueprint('check_bp', __name__) 
 service = CheckService()
 
@@ -112,6 +114,7 @@ def update_status(id):
     return jsonify({'message': 'Status atualizado com sucesso'})
 
 @bp.route('/<int:id>/prorrogate', methods=['POST'])
+@limite_senha
 @jwt_required()
 def prorrogate(id):
     """Recebimento parcial e/ou prorrogacao. Devolve o titulo como ficou gravado."""
@@ -147,6 +150,7 @@ def previa_exclusao(id):
     return jsonify(dados)
 
 @bp.route('/<int:id>', methods=['DELETE'])
+@limite_senha
 @jwt_required()
 def delete(id):
     """Apaga o titulo e desfaz no caixa o que ele lancou. Exige a senha no corpo."""
@@ -170,6 +174,7 @@ def create_check():
     return jsonify({'error': result}), 400
 
 @bp.route('/<int:id>', methods=['PUT'], strict_slashes=False)
+@limite_senha
 @jwt_required()
 def update_check(id):
     """Edita nome/datas do cheque. Exige a senha de quem esta logado no corpo do PUT."""

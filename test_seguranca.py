@@ -6,7 +6,7 @@ Seguranca da versao 2.10:
    Cadastro valida nome, e-mail (sem repetir, sem diferenciar maiuscula), nivel e senha (8+).
 2. Login: e-mail sem diferenciar maiuscula, usuario desativado nao entra, senha errada vira
    NEGADO na auditoria, e depois de 10 erros no minuto o login trava (429). Login certo nao conta.
-   Usuario apagado/desativado perde o acesso na hora (o token dele para de valer). Login dura 12h.
+   Usuario apagado/desativado perde o acesso na hora (o token dele para de valer). Login dura 15h.
 3. Listas com teto de 100 por pagina (clientes, borderos, caixa, auditoria).
 4. Backup na Auditoria: o worker grava BACKUP (deu certo) e FALHA (nao deu), alvo 'Backup'.
 
@@ -72,7 +72,7 @@ def main():
             db.session.add_all([AuditLog(user_name='x', action='CREATE', target='Teste', description=str(i)) for i in range(130)])
             db.session.commit()
             ids = {u.email: u.id for u in User.query}
-            assert app.config['JWT_ACCESS_TOKEN_EXPIRES'] == timedelta(hours=12)
+            assert app.config['JWT_ACCESS_TOKEN_EXPIRES'] == timedelta(hours=15)
             assert db.session.execute(text("SELECT 1 FROM pg_indexes WHERE indexname = 'ix_audit_logs_timestamp'")).scalar()
 
         erros_login = 0
@@ -197,7 +197,7 @@ def main():
 
         print("OK: equipe e auditoria so para Admin (cargo do banco), cadastro validado, ultimo Admin e o proprio "
               "usuario protegidos, apagado/desativado perde o acesso, login sem maiuscula, senha errada na "
-              "auditoria e trava apos 10 erros, login de 12h, teto de 100 por pagina, indice da auditoria, "
+              "auditoria e trava apos 10 erros, login de 15h, teto de 100 por pagina, indice da auditoria, "
               "backup (BACKUP/FALHA) na auditoria, aviso de backup com falha ou parado e 10/06 como feriado.")
     finally:
         if _app is not None:

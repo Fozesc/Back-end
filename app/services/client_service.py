@@ -1,5 +1,7 @@
+import re
 from app.models.domain import Client, ClientNote, Evento, Operation, Check, CheckExtension, User
 from app import db
+from app.utils.validacao import ler_numero, ler_texto
 from app.services.audit_service import AuditService
 from sqlalchemy import or_, and_, func, case, cast, exists, Integer
 from werkzeug.security import check_password_hash
@@ -51,18 +53,46 @@ class ClientService:
     def get_by_id(self, id):
         return Client.query.get(id)
 
+    def _campos(self, data, client=None):
+        """Le e confere o cadastro (versao 2.11.3). Antes gravava o que viesse: nome vazio dava
+        erro 500, limite/taxa aceitavam texto, negativo e NaN (taxa negativa virava a sugestao
+        do borderô) e o mesmo CPF entrava duas vezes sem aviso. So confere o que veio no pedido."""
+        if not isinstance(data, dict):
+            raise ValueError('Dados inválidos')
+        campos = {}
+        if client is None or 'name' in data:
+            campos['name'] = ler_texto(data.get('name'), 'o nome do cliente', 100, obrigatorio=True)
+        if 'document' in data:
+            campos['document'] = ler_texto(data.get('document'), 'o CPF/CNPJ', 20)
+            digitos = re.sub(r'\D', '', campos['document'] or '')
+            if digitos and (client is None or re.sub(r'\D', '', client.document or '') != digitos):
+                outro = Client.query.filter(
+                    func.regexp_replace(Client.document, r'\D', '', 'g') == digitos,
+                    *([Client.id != client.id] if client else [])).first()
+                if outro:
+                    raise ValueError(f"Já existe cliente com este CPF/CNPJ: {outro.name} (#{outro.id}). "
+                                     f"Se for a mesma pessoa, use Juntar cadastros.")
+        if 'phone' in data:
+            campos['phone'] = ler_texto(data.get('phone'), 'o telefone', 20)
+        if 'credit_limit' in data:
+            campos['credit_limit'] = ler_numero(data.get('credit_limit') or 0, 'Limite de crédito', 0, 10_000_000_000)
+        if 'standard_rate' in data:
+            campos['standard_rate'] = ler_numero(data.get('standard_rate') if data.get('standard_rate') not in (None, '') else 4.0,
+                                                 'Taxa do cliente', 0, 100, 4)
+        if 'notes' in data:
+            campos['notes'] = str(data.get('notes') or '')[:MAX_TEXTO_NOTA] or None
+        for campo, tam in ENDERECO.items():
+            if campo in data:
+                campos[campo] = _texto(data[campo], tam)
+        if campos.get('state'):
+            campos['state'] = campos['state'].upper()
+        return campos
+
     def create(self, data):
-        client = Client(
-            name=data.get('name'),
-            document=data.get('document'),
-            phone=data.get('phone'),
-            **{campo: _texto(data.get(campo), tam) for campo, tam in ENDERECO.items()},
-            credit_limit=data.get('credit_limit', 0.0),
-            standard_rate=data.get('standard_rate', 4.0),
-            notes=data.get('notes')
-        )
-        if client.state:
-            client.state = client.state.upper()
+        campos = self._campos(data)
+        campos.setdefault('credit_limit', 0.0)
+        campos.setdefault('standard_rate', 4.0)
+        client = Client(**campos)
         db.session.add(client)
         db.session.commit()
 
@@ -77,27 +107,15 @@ class ClientService:
     def update(self, id, data):
         client = self.get_by_id(id)
         if not client: return None
-        
+        campos = self._campos(data, client)
+
         old_name = client.name
         changes = []
-
-        if 'name' in data and data['name'] != client.name:
-            changes.append(f"Nome: {client.name} -> {data['name']}")
-            client.name = data['name']
-        if 'document' in data and data['document'] != client.document:
-            changes.append(f"Doc: {client.document} -> {data['document']}")
-            client.document = data['document']
-        if 'phone' in data: client.phone = data['phone']
-        if 'credit_limit' in data: 
-            changes.append(f"Limite: {client.credit_limit} -> {data['credit_limit']}")
-            client.credit_limit = data['credit_limit']
-        if 'standard_rate' in data: client.standard_rate = data['standard_rate']
-        if 'notes' in data: client.notes = data['notes']
-        for campo, tam in ENDERECO.items():
-            if campo in data:
-                setattr(client, campo, _texto(data[campo], tam))
-        if client.state:
-            client.state = client.state.upper()
+        for campo, rotulo in (('name', 'Nome'), ('document', 'Doc'), ('credit_limit', 'Limite'), ('standard_rate', 'Taxa')):
+            if campo in campos and campos[campo] != getattr(client, campo):
+                changes.append(f"{rotulo}: {getattr(client, campo)} -> {campos[campo]}")
+        for campo, valor in campos.items():
+            setattr(client, campo, valor)
 
         db.session.commit()
 
@@ -232,10 +250,17 @@ class ClientService:
         self.audit.log_action(nota.autor, 'CREATE', 'Nota', f"Nota #{nota.id} no cliente '{cliente.name}' (#{client_id})")
         return self._serialize_nota(nota)
 
+    def _so_autor_ou_admin(self, nota, acao):
+        """Nota so e' editada ou apagada por quem escreveu (pelo nome gravado) ou pelo Admin."""
+        usuario = self._usuario_logado()
+        if not usuario or (usuario.role != 'Admin' and usuario.name != nota.autor):
+            raise PermissionError(f'Só quem escreveu a nota ({nota.autor}) ou o administrador pode {acao}.')
+
     def editar_nota(self, client_id, nota_id, dados):
         nota = self._nota(client_id, nota_id)
         if not nota:
             return None
+        self._so_autor_ou_admin(nota, 'editar')
         texto = self._texto_nota(dados)
         if texto != nota.texto:
             antigo = nota.texto
@@ -250,6 +275,7 @@ class ClientService:
         nota = self._nota(client_id, nota_id)
         if not nota:
             return False
+        self._so_autor_ou_admin(nota, 'apagar')
         retrato = (f"Apagou a nota #{nota.id} do cliente #{client_id} (autor: {nota.autor}, "
                    f"criada em {nota.criado_em:%d/%m/%Y %H:%M}): '{nota.texto[:1000]}'")
         db.session.delete(nota)

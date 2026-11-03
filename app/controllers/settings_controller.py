@@ -3,6 +3,8 @@ from app.services.settings_service import SettingsService
 from flask_jwt_extended import jwt_required
 from app.controllers import so_admin
 
+from app.controllers import limite_senha
+
 bp = Blueprint('settings_bp', __name__)
 service = SettingsService()
 
@@ -12,10 +14,13 @@ def get_settings():
     return jsonify(service.get_settings())
 
 @bp.route('/', methods=['PUT'], strict_slashes=False)
-@jwt_required()
+@so_admin
 def update_settings():
-    data = request.get_json()
-    return jsonify(service.update_settings(data))
+    """Taxas, IOF, multa e dados da empresa: so o Admin (mudam todo borderô e prorrogacao)."""
+    try:
+        return jsonify(service.update_settings(request.get_json(silent=True) or {}))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
 
 @bp.route('/backup', methods=['GET'])
@@ -32,6 +37,7 @@ def status_backup():
 
 
 @bp.route('/backup', methods=['PUT'])
+@limite_senha
 @so_admin
 def update_backup():
     try:

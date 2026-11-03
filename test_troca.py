@@ -105,6 +105,9 @@ def main():
 
         r = http.put(f"/api/transactions/{entrada['id']}", headers=cab,
                      json={'valor': 700, 'descricao': 'Joao corrigido', 'tipo': 'saida'})
+        assert r.status_code == 403, 'mudar o valor pede a senha (2.11.3)'
+        r = http.put(f"/api/transactions/{entrada['id']}", headers=cab,
+                     json={'valor': 700, 'descricao': 'Joao corrigido', 'tipo': 'saida', 'senha': SENHA})
         assert r.status_code == 200, r.data
         with app.app_context():
             e, sa = db.session.get(Transaction, entrada['id']), db.session.get(Transaction, saida['id'])
@@ -112,7 +115,7 @@ def main():
             assert (e.amount, sa.amount) == (700, -700), (e.amount, sa.amount)
             assert sa.description == 'Joao corrigido'
 
-        r = http.put(f"/api/transactions/{entrada['id']}", headers=cab, json={'origem': 'Banco do Brasil'})
+        r = http.put(f"/api/transactions/{entrada['id']}", headers=cab, json={'origem': 'Banco do Brasil', 'senha': SENHA})
         assert r.status_code == 400, 'as duas pontas na mesma conta'
 
         r = http.delete(f"/api/transactions/{entrada['id']}", headers=cab, json={'senha': SENHA})

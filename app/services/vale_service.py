@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from sqlalchemy import func, or_
 from app import db
+from app.utils.validacao import ler_data
 from werkzeug.security import check_password_hash
 from app.models.domain import Vale, Transaction, User
 from app.services.audit_service import AuditService
@@ -23,10 +24,7 @@ def _usuario():
 def _data(texto):
     if not texto:
         return date.today()
-    try:
-        return datetime.strptime(str(texto)[:10], '%Y-%m-%d').date()
-    except ValueError:
-        raise ValueError('Data inválida')
+    return ler_data(texto)
 
 
 def _conta(texto):

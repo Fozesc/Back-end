@@ -31,3 +31,6 @@ conferido*.xlsx
 *.xls
 import_logs/
 relatorio_*.csv
+
+# testes rodam no GitHub (CI), nao precisam ir para a imagem do servidor
+test_*.py

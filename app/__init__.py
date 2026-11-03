@@ -1,4 +1,6 @@
-from flask import Flask
+from flask import Flask, jsonify, request
+from flask.json.provider import DefaultJSONProvider
+from werkzeug.exceptions import HTTPException
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
 from flask_cors import CORS
@@ -37,8 +39,21 @@ def check_if_token_revoked(jwt_header, jwt_payload):
     # usuario apagado ou desativado perde o acesso na hora, mesmo com o login ainda valendo
     usuario = db.session.query(User.active).filter_by(id=int(jwt_payload["sub"])).first()
     return usuario is None or usuario.active is False
+def _recusar_constante(nome):
+    raise ValueError(f'valor {nome} não é aceito')
+
+
+class JsonSemNaN(DefaultJSONProvider):
+    """JSON que recusa NaN/Infinity: o json do Python aceita por padrao, e um "NaN" no limite
+    de credito ou no saldo inicial passava a aparecer como NaN no painel inteiro."""
+    def loads(self, s, **kwargs):
+        kwargs.setdefault('parse_constant', _recusar_constante)
+        return super().loads(s, **kwargs)
+
+
 def create_app():
     app = Flask(__name__)
+    app.json = JsonSemNaN(app)
     app.config.from_object(Config)
     # Atras do nginx todo pedido chega com o IP do nginx: sem isto o limite de pedidos valia
     # para o escritorio inteiro somado. O nginx manda o IP de verdade no X-Forwarded-For.
@@ -63,6 +78,30 @@ def create_app():
     from .models import domain
     from .controllers import register_blueprints
     register_blueprints(app)
+
+    # JSON quebrado ou com NaN/Infinity e' recusado (400) antes de chegar na rota: sem isso, as
+    # rotas que leem com silent=True recebiam {} e respondiam "salvo" sem salvar nada
+    @app.before_request
+    def json_valido():
+        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and request.mimetype == 'application/json' \
+                and request.get_data(cache=True):
+            request.get_json()
+
+    # Erro nunca volta como pagina HTML nem com detalhe interno: a tela sempre recebe
+    # {"error": "..."} e o banco nao fica com transacao pela metade.
+    @app.errorhandler(HTTPException)
+    def erro_http(e):
+        mensagens = {400: 'Pedido inválido: confira os dados enviados.', 404: 'Não encontrado.',
+                     405: 'Operação não permitida.', 413: 'Arquivo grande demais.'}
+        if e.code == 429:
+            return jsonify({'error': e.description or 'Muitas tentativas. Espere alguns minutos e tente de novo.'}), 429
+        return jsonify({'error': mensagens.get(e.code, e.name)}), e.code
+
+    @app.errorhandler(Exception)
+    def erro_inesperado(e):
+        db.session.rollback()
+        app.logger.exception('Erro inesperado em %s %s', request.method, request.path)
+        return jsonify({'error': 'Erro interno: nada foi gravado. Tente de novo; se continuar, avise o administrador.'}), 500
 
  
     with app.app_context():

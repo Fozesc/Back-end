@@ -54,7 +54,7 @@ def main():
     try:
         from app import create_app, db
         from app.models.domain import AuditLog, Check, Client, CompanySettings, Operation, Transaction, User
-        from app.services.operation_service import arredondar_pagamento, calcular_comissao, calcular_linha
+        from app.services.operation_service import calcular_comissao, calcular_linha
         from werkzeug.security import generate_password_hash
 
         app = create_app()
@@ -77,9 +77,7 @@ def main():
         CHEQUES = [(1000, 30), (2000, 60)]
 
         def linhas():
-            ls = [list(calcular_linha(v, d, 4)) for v, d in CHEQUES]
-            arredondar_pagamento(ls)
-            return ls
+            return [list(calcular_linha(v, d, 4)) for v, d in CHEQUES]
 
         def bordero(partes, comissao=0, conta='Dinheiro'):
             return http.post('/api/operations', headers=cab, json={
@@ -90,7 +88,6 @@ def main():
 
         (j1, _, l1), (j2, _, l2) = linhas()
         liquido = round(l1 + l2, 2)
-        assert liquido == int(liquido), 'o pagamento do cliente nao tem centavos'
 
         # ------------------------------------------------ invalido: nada gravado
         with app.app_context():
