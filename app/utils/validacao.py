@@ -6,6 +6,7 @@ banco (o painel passava a mostrar NaN). Aqui tudo que nao for valido vira ValueE
 mensagem que a pessoa entende - e o controller devolve 400.
 """
 import math
+import re
 from datetime import date, datetime
 
 ANO_MIN, ANO_MAX = 2000, 2100
@@ -53,3 +54,32 @@ def ler_texto(valor, campo, maximo, obrigatorio=False):
     if obrigatorio and not texto:
         raise ValueError(f'Informe {campo}')
     return texto or None
+
+
+def _dv_cnpj(base):
+    """Digito do CNPJ (numerico ou alfanumerico, IN RFB 2.229/2024): cada caractere vale ord(c) - 48."""
+    pesos = list(range(len(base) - 7, 1, -1)) + list(range(9, 1, -1))
+    soma = sum((ord(c) - 48) * p for c, p in zip(base, pesos))
+    resto = soma % 11
+    return '0' if resto < 2 else str(11 - resto)
+
+
+def documento_valido(texto):
+    """CPF (11 digitos) ou CNPJ (14 caracteres, os 12 primeiros podem ter letras) com os digitos verificadores
+    certos. Vazio conta como valido (o campo e' opcional)."""
+    doc = re.sub(r'[^0-9A-Za-z]', '', str(texto or '')).upper()
+    if not doc:
+        return True
+    if re.fullmatch(r'\d{11}', doc):
+        if doc == doc[0] * 11:
+            return False
+        for n in (9, 10):
+            soma = sum(int(doc[i]) * (n + 1 - i) for i in range(n))
+            if int(doc[n]) != (soma * 10 % 11) % 10:
+                return False
+        return True
+    if re.fullmatch(r'[0-9A-Z]{12}\d{2}', doc):
+        if doc == doc[0] * 14:
+            return False
+        return _dv_cnpj(doc[:12]) == doc[12] and _dv_cnpj(doc[:13]) == doc[13]
+    return False

@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 from app.services.check_service import CheckService
 from flask_jwt_extended import jwt_required
 
-from app.controllers import limite_senha
+from app.controllers import limite_senha, so_admin
 
 bp = Blueprint('check_bp', __name__) 
 service = CheckService()
@@ -21,9 +21,10 @@ def index():
     sort_by = request.args.get('sort_by', 'due_date')
     sort_order = request.args.get('sort_order', 'asc')
     calculo = request.args.get('calculo')  # 'dentro' | 'fora' | vazio (todos)
+    empresa = request.args.get('empresa')  # 'PQ' | 'Fozesc' | vazio (as duas)
 
     return jsonify(service.get_paginated(page, per_page, search, status, date_start,
-                                         date_end, sort_by, sort_order, calculo))
+                                         date_end, sort_by, sort_order, calculo, empresa))
 
 
 @bp.route('/relatorio', methods=['GET'])
@@ -33,12 +34,12 @@ def relatorio():
     a = request.args
     return jsonify(service.relatorio(a.get('search', ''), a.get('status', ''), a.get('date_start'),
                                      a.get('date_end'), a.get('sort_by', 'due_date'),
-                                     a.get('sort_order', 'asc'), a.get('calculo')))
+                                     a.get('sort_order', 'asc'), a.get('calculo'), a.get('empresa')))
 
 
 # Filtros que a acao em lote aceita - os MESMOS da listagem. Whitelist de proposito:
 # sem ela, um campo qualquer no JSON entraria direto como parametro da query.
-FILTROS_LOTE = ('search', 'status', 'date_start', 'date_end', 'calculo')
+FILTROS_LOTE = ('search', 'status', 'date_start', 'date_end', 'calculo', 'empresa')
 
 
 @bp.route('/calculo', methods=['PATCH'])
@@ -72,7 +73,7 @@ def risco_emitentes():
     """Sem ?nome: quem concentra mais dinheiro e quem mais deu problema. Com ?nome: so ele."""
     nome = request.args.get('nome')
     return jsonify(service.risco_emitentes(nome[:100] if nome is not None else None,
-                                           request.args.get('limit', 8, type=int)))
+                                           request.args.get('limit', 8, type=int), request.args.get('empresa')))
 
 
 @bp.route('/portfolio-total', methods=['GET'])
@@ -151,7 +152,7 @@ def previa_exclusao(id):
 
 @bp.route('/<int:id>', methods=['DELETE'])
 @limite_senha
-@jwt_required()
+@so_admin
 def delete(id):
     """Apaga o titulo e desfaz no caixa o que ele lancou. Exige a senha no corpo."""
     data = request.get_json(silent=True) or {}

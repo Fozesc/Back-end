@@ -3,6 +3,7 @@ from app.models.domain import Transaction, CompanySettings, User, Check, Operati
 from app.services.operation_service import recalcular_total
 from app import db
 from app.services.audit_service import AuditService
+from app.services.history_service import filtro_conta
 from sqlalchemy import func, case, or_
 from datetime import datetime, date
 from werkzeug.security import check_password_hash
@@ -179,7 +180,7 @@ class TransactionService:
             'capital_total': capital_base
         }
 
-    def get_paginated(self, page, per_page, search=None, date_filter=None, type_filter=None):
+    def get_paginated(self, page, per_page, search=None, date_filter=None, type_filter=None, conta=None):
         # ATENÇÃO: aqui existia um DELETE que apagava transações com amount/date nulos
         # TODA vez que a lista era carregada (um DELETE dentro de uma simples leitura).
         # Isso podia sumir com lançamentos silenciosamente. Uma listagem NÃO deve apagar
@@ -189,6 +190,7 @@ class TransactionService:
         if search: filtros.append(Transaction.description.ilike(f"%{search}%"))
         if date_filter: filtros.append(func.date(Transaction.date) == date_filter)
         if type_filter and type_filter != 'todos': filtros.append(Transaction.type == type_filter)
+        if filtro_conta(conta) is not None: filtros.append(filtro_conta(conta))
         query = Transaction.query.filter(*filtros).order_by(Transaction.date.desc(), Transaction.id.desc())
 
         pagination = query.paginate(page=page, per_page=per_page, max_per_page=MAX_POR_PAGINA, error_out=False)

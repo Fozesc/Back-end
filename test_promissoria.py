@@ -101,14 +101,14 @@ def main():
         assert sorted(i['tipo'] for i in itens) == ['CHEQUE', 'CHEQUE', 'PROMISSORIA', 'PROMISSORIA'], itens
 
         # as duas empresas do topo do borderô: a PQ tem nome, CNPJ e endereco proprios nos Ajustes
-        r = http.put('/api/settings/', headers=cab, json={'pqNome': '  PQ  Fomento ', 'pqCnpj': '98.765.432/0001-10',
+        r = http.put('/api/settings/', headers=cab, json={'pqNome': '  PQ  Fomento ', 'pqCnpj': '11.222.333/0001-81',
                                                           'pqEndereco': 'Rua B, 20 - Foz'})
         assert r.status_code == 200, r.data
         g = http.get('/api/settings/', headers=cab).get_json()
         assert (g['pqNome'], g['pqCnpj'], g['pqEndereco'], g['nomeEmpresa']) == \
-            ('PQ Fomento', '98.765.432/0001-10', 'Rua B, 20 - Foz', 'Fozesc Teste'), g
-        assert http.put('/api/settings/', headers=cab, json={'pqCnpj': '1' * 25}).get_json()['pqCnpj'] == '1' * 20, \
-            'cortado no tamanho da coluna, como o CNPJ da Fozesc'
+            ('PQ Fomento', '11.222.333/0001-81', 'Rua B, 20 - Foz', 'Fozesc Teste'), g
+        assert http.put('/api/settings/', headers=cab, json={'pqCnpj': '1' * 25}).status_code == 400, \
+            'CNPJ com digito errado e recusado'
         with app.app_context():
             assert any('Nome PQ: None -> PQ Fomento' in a.description for a in AuditLog.query.filter_by(target='Configuracao'))
 
@@ -133,7 +133,7 @@ def main():
             cli.document, cli.address, cli.city, cli.state = '111.222.333-44', 'Rua A, 1', 'Foz', 'PR'
             db.session.commit()
         d = http.get(f'/api/operations/{op_pq}/documento', headers=cab).get_json()
-        assert d['empresa'] == {'chave': 'PQ', 'nome': 'PQ Fomento', 'cnpj': '1' * 20, 'endereco': 'Rua B, 20 - Foz'}, d['empresa']
+        assert d['empresa'] == {'chave': 'PQ', 'nome': 'PQ Fomento', 'cnpj': '11.222.333/0001-81', 'endereco': 'Rua B, 20 - Foz'}, d['empresa']
         assert d['avalista'] == {'nome': 'José Avalista', 'documento': '987.654.321-00'}
         assert d['cliente'] == {'nome': 'Ana', 'documento': '111.222.333-44', 'telefone': '', 'endereco': 'Rua A, 1 - Foz/PR'}
         assert [(t['tipo'], t['numero'], t['valor'], t['vencimento']) for t in d['titulos']] == \
@@ -141,12 +141,12 @@ def main():
         assert d['conta_saida'] == 'BB' and d['observacao'] == 'obs do dia' and d['liquido_total'] == round(
             sum(t['liquido'] for t in d['titulos']), 2)
         antigo = http.get(f'/api/operations/{op}/documento', headers=cab).get_json()
-        assert antigo['empresa']['chave'] == 'Fozesc' and antigo['empresa']['nome'] == 'Fozesc Teste', 'borderô sem empresa = Fozesc'
+        assert antigo['empresa']['chave'] == 'PQ' and antigo['empresa']['nome'] == 'PQ Fomento', 'borderô sem empresa = PQ (padrao)'
         assert http.get('/api/operations/9999/documento', headers=cab).status_code == 404
         assert http.get(f'/api/operations/{op_pq}/documento').status_code == 401
 
         print("OK: documento do borderô para baixar de novo (empresa e avalista gravados, cliente, valor/vencimento "
-              "de origem, sem empresa = Fozesc, empresa invalida recusada), Ajustes com a 2a empresa (PQ: nome, CNPJ, endereco, auditado), borderô de promissorias grava o tipo e o numero da parcela (sem banco), mesma conta do cheque, "
+              "de origem, sem empresa = PQ, empresa invalida recusada), Ajustes com a 2a empresa (PQ: nome, CNPJ, endereco, auditado), borderô de promissorias grava o tipo e o numero da parcela (sem banco), mesma conta do cheque, "
               "sem tipo continua cheque, tipo desconhecido recusado sem gravar, lista de titulos mostra o tipo.")
     finally:
         if _app is not None:

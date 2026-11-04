@@ -1,7 +1,7 @@
 import re
 from app.models.domain import Client, ClientNote, Evento, Operation, Check, CheckExtension, User
 from app import db
-from app.utils.validacao import ler_numero, ler_texto
+from app.utils.validacao import ler_numero, ler_texto, documento_valido
 from app.services.audit_service import AuditService
 from sqlalchemy import or_, and_, func, case, cast, exists, Integer
 from werkzeug.security import check_password_hash
@@ -23,6 +23,8 @@ MIN_AVALIADOS = 3
 # endereco do cadastro: campo -> tamanho da coluna (UF vai em maiuscula). Antes so `address`
 # era gravado na criacao e nada na edicao: bairro, cidade, UF e CEP digitados se perdiam.
 ENDERECO = {'email': 100, 'address': 200, 'neighborhood': 100, 'city': 100, 'state': 2, 'zip_code': 20}
+# so para contrato (opcional): RG/nacionalidade/estado civil da pessoa fisica e o representante da empresa
+DADOS_CONTRATO = {'rg': 30, 'nacionalidade': 50, 'estado_civil': 30, 'rep_nome': 100, 'rep_cpf': 20, 'rep_rg': 30, 'rep_nacionalidade': 50, 'rep_estado_civil': 30, 'rep_endereco': 200}
 
 
 def _texto(valor, tamanho):
@@ -72,6 +74,9 @@ class ClientService:
                 if outro:
                     raise ValueError(f"Já existe cliente com este CPF/CNPJ: {outro.name} (#{outro.id}). "
                                      f"Se for a mesma pessoa, use Juntar cadastros.")
+        if campos.get('document') and campos['document'] != (client.document if client else None) \
+                and not documento_valido(campos['document']):
+            raise ValueError('CPF/CNPJ do cliente inválido: confira os dígitos')
         if 'phone' in data:
             campos['phone'] = ler_texto(data.get('phone'), 'o telefone', 20)
         if 'credit_limit' in data:
@@ -81,11 +86,14 @@ class ClientService:
                                                  'Taxa do cliente', 0, 100, 4)
         if 'notes' in data:
             campos['notes'] = str(data.get('notes') or '')[:MAX_TEXTO_NOTA] or None
-        for campo, tam in ENDERECO.items():
+        for campo, tam in {**ENDERECO, **DADOS_CONTRATO}.items():
             if campo in data:
                 campos[campo] = _texto(data[campo], tam)
         if campos.get('state'):
             campos['state'] = campos['state'].upper()
+        if campos.get('rep_cpf') and campos['rep_cpf'] != (client.rep_cpf if client else None) \
+                and not documento_valido(campos['rep_cpf']):
+            raise ValueError('CPF do representante inválido: confira os dígitos')
         return campos
 
     def create(self, data):
@@ -114,6 +122,9 @@ class ClientService:
         for campo, rotulo in (('name', 'Nome'), ('document', 'Doc'), ('credit_limit', 'Limite'), ('standard_rate', 'Taxa')):
             if campo in campos and campos[campo] != getattr(client, campo):
                 changes.append(f"{rotulo}: {getattr(client, campo)} -> {campos[campo]}")
+        mudou_contrato = [c for c in DADOS_CONTRATO if c in campos and campos[c] != getattr(client, c)]
+        if mudou_contrato:
+            changes.append('dados para contrato: ' + ', '.join(c.replace('_', ' ') for c in mudou_contrato))
         for campo, valor in campos.items():
             setattr(client, campo, valor)
 
@@ -196,6 +207,10 @@ class ClientService:
             qtd_notas = ClientNote.query.filter_by(client_id=origem.id).update(
                 {'client_id': destino.id}, synchronize_session=False)
             Evento.query.filter_by(client_id=origem.id).update({'client_id': destino.id}, synchronize_session=False)
+            # dados para contrato (e endereco/e-mail) que so o cadastro apagado tinha passam para o que fica
+            for campo in {**ENDERECO, **DADOS_CONTRATO}:
+                if not getattr(destino, campo) and getattr(origem, campo):
+                    setattr(destino, campo, getattr(origem, campo))
             db.session.delete(origem)
             db.session.commit()
         except Exception:
@@ -210,6 +225,38 @@ class ClientService:
 
         return {'borderos': qtd_borderos, 'cheques': qtd_cheques,
                 'apagado': nome_origem, 'mantido': nome_destino, 'destino_id': destino_id}
+
+    def delete(self, id, senha):
+        """Apaga o cadastro que nao tem borderô (cadastro errado ou repetido sem historico).
+        Com borderô nao apaga: o historico do cliente sai junto, use "Juntar cadastros".
+        As notas do cliente saem junto; o calendario fica, sem o cliente."""
+        cliente = self.get_by_id(id)
+        if not cliente:
+            return None
+        usuario = self._usuario_logado()
+        if not usuario or not check_password_hash(usuario.password_hash, str(senha or '')):
+            self.audit.log_action(self._get_current_user(), 'NEGADO', 'Cliente',
+                                  f"Senha incorreta ao tentar apagar o cliente '{cliente.name}' (#{cliente.id})")
+            raise PermissionError("Senha incorreta - o cliente não foi apagado")
+        qtd = db.session.query(func.count(Operation.id)).filter(Operation.client_id == cliente.id).scalar() or 0
+        if qtd:
+            raise ValueError(f"Este cliente tem {qtd} borderô(s) e não pode ser apagado: apague os borderôs "
+                             "antes ou use \"Juntar cadastros\" se for um cadastro repetido.")
+        retrato = (f"nome='{cliente.name}' doc='{cliente.document or ''}' tel='{cliente.phone or ''}' "
+                   f"limite={cliente.credit_limit or 0} taxa={cliente.standard_rate or 0} "
+                   f"obs='{(cliente.notes or '')[:200]}'")
+        try:
+            qtd_notas = ClientNote.query.filter_by(client_id=cliente.id).delete(synchronize_session=False)
+            Evento.query.filter_by(client_id=cliente.id).update({'client_id': None}, synchronize_session=False)
+            db.session.delete(cliente)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        self.audit.log_action(self._get_current_user(), 'DELETE', 'Cliente',
+                              f"Apagou o cliente #{id} sem borderô ({qtd_notas} nota(s) junto). "
+                              f"Cadastro apagado: [{retrato}] [confirmado com senha]")
+        return {'apagado': cliente.name}
 
     @staticmethod
     def _texto_nota(dados):
@@ -313,7 +360,7 @@ class ClientService:
                 'credit_limit': client.credit_limit,
                 'standard_rate': client.standard_rate,
                 'notes': client.notes,
-                **{campo: getattr(client, campo) for campo in ENDERECO},
+                **{campo: getattr(client, campo) for campo in {**ENDERECO, **DADOS_CONTRATO}},
                 'valor_em_aberto': stats['total_debt'],
                 'cheques_ativos': stats['active_count'],
                 'cheques_totais': stats['total_count'],

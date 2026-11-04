@@ -20,7 +20,8 @@ def month_detail(year, month):
     if month < 1 or month > 12:
         return jsonify({'error': 'Mês inválido'}), 400
     return jsonify(service.compute_month_detail(year, month, request.args.get('page', 1, type=int),
-                                                request.args.get('per_page', 50, type=int)))
+                                                request.args.get('per_page', 50, type=int),
+                                                request.args.get('conta') or None))
 
 
 @bp.route('/lucro', methods=['GET'])

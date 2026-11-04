@@ -1,10 +1,14 @@
 from app import db
 from app.models.domain import Check, Transaction, CompanySettings, Operation
 from sqlalchemy import func, case, and_
+from app.services.operation_service import filtrar_empresa
 from datetime import datetime, timedelta
 
 class DashboardService:
-    def get_dashboard_data(self, period='meses'):
+    def get_dashboard_data(self, period='meses', empresa=None):
+        # empresa: 'PQ' | 'Fozesc' filtra tudo que vem dos titulos/borderôs; vazio = as duas. Capital e
+        # caixa sao das duas empresas juntas (o dinheiro e' o mesmo), entao nao mudam com o filtro.
+        titulos = lambda *colunas: filtrar_empresa(db.session.query(*colunas).select_from(Check).join(Operation, Check.operation_id == Operation.id), empresa)
      
         settings = CompanySettings.query.first()
         capital = settings.capital_social if settings else 0.0
@@ -18,7 +22,7 @@ class DashboardService:
         # R$ 215 mil de juros de cheque antigo ainda em aberto como se fosse lucro.
         # Decisao do Lucas (15/09/2026). Os cheques em aberto continuam aparecendo
         # em Carteira e Inadimplencia - so nao contam como lucro antes de receber.
-        lucro = db.session.query(func.sum(Check.interest_amount)).filter(
+        lucro = titulos(func.sum(Check.interest_amount)).filter(
             Check.fora_do_calculo.is_(False),
             Check.status == 'Pago'
         ).scalar() or 0.0
@@ -29,7 +33,7 @@ class DashboardService:
         # Titulos e o Calendario: o status gravado so vira Atrasado se alguem marcar.
         situacao = case((and_(Check.status == 'Aguardando', Check.due_date < datetime.now().date()), 'Atrasado'),
                         else_=Check.status)
-        status_sums = db.session.query(
+        status_sums = titulos(
             situacao, func.sum(Check.amount)
         ).filter(Check.fora_do_calculo.is_(False)).group_by(situacao).all()
 
@@ -45,7 +49,7 @@ class DashboardService:
         ]
 
       
-        upcoming = Check.query.filter(
+        upcoming = filtrar_empresa(Check.query.join(Operation, Check.operation_id == Operation.id), empresa).filter(
             Check.status.in_(['Aguardando', 'Prorrogado']),
             Check.due_date >= datetime.now().date(),
             Check.fora_do_calculo.is_(False)
@@ -60,13 +64,13 @@ class DashboardService:
         } for c in upcoming]
 
     
-        evolution = self._get_evolution_data(period)
+        evolution = self._get_evolution_data(period, empresa)
 
         # Vencimentos de HOJE. De proposito NAO acumula o que venceu antes: o Lucas
         # pediu aviso so do dia, senao vira uma lista de cobranca que cresce sozinha
         # e ele para de olhar. Quem quer o historico usa a tela de Cheques.
         hoje = datetime.now().date()
-        qtd_hoje, total_hoje = db.session.query(
+        qtd_hoje, total_hoje = titulos(
             func.count(Check.id), func.coalesce(func.sum(Check.amount), 0.0)
         ).filter(Check.due_date == hoje,
                  Check.status.in_(['Aguardando', 'Prorrogado']),
@@ -86,10 +90,11 @@ class DashboardService:
                 'pie_chart': pie_data,
                 'evolution': evolution
             },
-            'upcoming': upcoming_data
+            'upcoming': upcoming_data,
+            'empresa': empresa if empresa in ('PQ', 'Fozesc') else None,
         }
 
-    def _get_evolution_data(self, period):
+    def _get_evolution_data(self, period, empresa=None):
         """Agrega dados de Lucro (Juros) e Caixa (Movimentação) por período"""
         
 
@@ -112,10 +117,10 @@ class DashboardService:
         # poder tirar do grafico so os cheques marcados como historico. Conferido no
         # banco: sum(Check.interest_amount) == Operation.total_interest, diferenca 0,00
         # em todos os 4.119 borderos - o numero de quem conta nao muda.
-        profit_query = db.session.query(
+        profit_query = filtrar_empresa(db.session.query(
             func.to_char(Operation.operation_date, 'YYYY-MM-DD'),
             func.sum(Check.interest_amount)
-        ).join(Check, Check.operation_id == Operation.id)\
+        ).join(Check, Check.operation_id == Operation.id), empresa)\
          .filter(Operation.operation_date >= start_date,
                  Check.fora_do_calculo.is_(False))\
          .group_by(func.to_char(Operation.operation_date, 'YYYY-MM-DD'))\

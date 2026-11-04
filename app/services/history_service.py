@@ -3,7 +3,7 @@ from datetime import date
 from app import db
 from app.utils.validacao import ANO_MIN, ANO_MAX
 from app.models.domain import Transaction, Operation, Check
-from sqlalchemy import func, case, extract, and_
+from sqlalchemy import func, case, extract, and_, or_, not_
 
 LANCAMENTOS_POR_PAGINA = 50
 MAX_LANCAMENTOS_POR_PAGINA = 100
@@ -28,6 +28,14 @@ def bank_key(origin):
     if 'CAIXA' in o or 'CEF' in o:
         return 'CAIXA'
     return 'DINHEIRO'
+
+
+def filtro_conta(conta):
+    """A mesma regra do bank_key, no banco (para filtrar listagens). None = conta invalida."""
+    o = func.upper(func.coalesce(Transaction.origin, ''))
+    bb = or_(o.like('%BRASIL%'), o.like('%BB%'))
+    cx = and_(not_(bb), or_(o.like('%CAIXA%'), o.like('%CEF%')))
+    return {'BRASIL': bb, 'CAIXA': cx, 'DINHEIRO': and_(not_(bb), not_(cx))}.get(conta)
 
 
 NOME_CONTA = {
@@ -202,7 +210,7 @@ class HistoryService:
     # ------------------------------------------------------------------ #
     # Detalhe do mês: saldo por banco + crescimento/perda + lançamentos
     # ------------------------------------------------------------------ #
-    def compute_month_detail(self, year, month, page=1, per_page=LANCAMENTOS_POR_PAGINA):
+    def compute_month_detail(self, year, month, page=1, per_page=LANCAMENTOS_POR_PAGINA, conta=None):
         year, month = int(year), int(month)
         start, end = self._month_bounds(year, month)
 
@@ -251,9 +259,10 @@ class HistoryService:
 
         # Lançamentos do mês (o extrato)
         # linha so informativa (total do borderô, juros sem a comissao) fica fora: nao e' dinheiro
-        pagina = Transaction.query.filter(
-            Transaction.date >= start, Transaction.date <= end, Transaction.valor_informativo.is_(None)
-        ).order_by(Transaction.date.desc(), Transaction.id.desc()).paginate(
+        filtros = [Transaction.date >= start, Transaction.date <= end, Transaction.valor_informativo.is_(None)]
+        if filtro_conta(conta) is not None:
+            filtros.append(filtro_conta(conta))
+        pagina = Transaction.query.filter(*filtros).order_by(Transaction.date.desc(), Transaction.id.desc()).paginate(
             page=page, per_page=per_page, max_per_page=MAX_LANCAMENTOS_POR_PAGINA, error_out=False)
         lancs = pagina.items
 

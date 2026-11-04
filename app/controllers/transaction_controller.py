@@ -16,8 +16,9 @@ def index():
     search = request.args.get('search', '', type=str)
     date = request.args.get('date', '', type=str) or None
     tipo = request.args.get('type', 'todos', type=str)
-    
-    data = service.get_paginated(page, per_page, search, date, tipo)
+    conta = request.args.get('conta', '', type=str) or None
+
+    data = service.get_paginated(page, per_page, search, date, tipo, conta)
     return jsonify(data)
 
 @bp.route('/balances', methods=['GET'])
@@ -71,7 +72,7 @@ def update_initial_balances():
 
 @bp.route('/<int:id>', methods=['DELETE'])
 @limite_senha
-@jwt_required()
+@so_admin
 def delete(id):
     """Apaga lancamento do caixa. Exige a senha de quem esta logado no corpo."""
     data = request.get_json(silent=True) or {}

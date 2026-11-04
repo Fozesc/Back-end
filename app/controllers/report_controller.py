@@ -15,6 +15,7 @@ def resumo():
             request.args.get('tipo'),
             request.args.get('inicio'),
             request.args.get('fim'),
+            request.args.get('empresa'),
         )
     except ValueError as e:
         return jsonify({'error': str(e)}), 400

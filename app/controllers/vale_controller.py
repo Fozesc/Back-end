@@ -3,7 +3,7 @@ from flask_jwt_extended import jwt_required
 from app import db
 from app.services.vale_service import ValeService
 
-from app.controllers import limite_senha
+from app.controllers import limite_senha, so_admin
 
 bp = Blueprint('vales', __name__)
 service = ValeService()
@@ -70,7 +70,7 @@ def editar(id):
 
 @bp.route('/<int:id>', methods=['DELETE'])
 @limite_senha
-@jwt_required()
+@so_admin
 def apagar(id):
     try:
         r = service.apagar(id, request.get_json(silent=True) or {})

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 from app.models.domain import AuditLog, BackupConfig, CompanySettings, User
 from app import db
-from app.utils.validacao import ler_numero, ler_texto
+from app.utils.validacao import ler_numero, ler_texto, documento_valido
 from app.services.audit_service import AuditService
 from flask_jwt_extended import get_jwt, get_jwt_identity
 from werkzeug.security import check_password_hash
@@ -54,6 +54,32 @@ class SettingsService:
         'pqNome': ('Nome PQ', 'pq_nome', lambda v: ler_texto(v, 'o nome da PQ', 100)),
         'pqCnpj': ('CNPJ PQ', 'pq_cnpj', lambda v: ler_texto(v, 'o CNPJ da PQ', 20)),
         'pqEndereco': ('Endereço PQ', 'pq_endereco', lambda v: ler_texto(v, 'o endereço da PQ', 200)),
+        # dados para o contrato (e-mail, representante legal e se e' Empresa Simples de Credito)
+        'email': ('E-mail', 'email', lambda v: ler_texto(v, 'o e-mail', 100)),
+        'repNome': ('Nome do representante', 'rep_nome', lambda v: ler_texto(v, 'nome do representante', 100)),
+        'repCpf': ('CPF do representante', 'rep_cpf', lambda v: ler_texto(v, 'CPF do representante', 20)),
+        'repRg': ('RG do representante', 'rep_rg', lambda v: ler_texto(v, 'RG do representante', 30)),
+        'repNacionalidade': ('Nacionalidade do representante', 'rep_nacionalidade', lambda v: ler_texto(v, 'nacionalidade do representante', 50)),
+        'repEstadoCivil': ('Estado civil do representante', 'rep_estado_civil', lambda v: ler_texto(v, 'estado civil do representante', 30)),
+        'repEndereco': ('Endereço do representante', 'rep_endereco', lambda v: ler_texto(v, 'endereço do representante', 200)),
+        'pqEmail': ('E-mail da PQ', 'pq_email', lambda v: ler_texto(v, 'o e-mail da PQ', 100)),
+        'pqTelefone': ('Telefone da PQ', 'pq_telefone', lambda v: ler_texto(v, 'o telefone da PQ', 20)),
+        'pqRepNome': ('Nome do representante da PQ', 'pq_rep_nome', lambda v: ler_texto(v, 'nome do representante da PQ', 100)),
+        'pqRepCpf': ('CPF do representante da PQ', 'pq_rep_cpf', lambda v: ler_texto(v, 'CPF do representante da PQ', 20)),
+        'pqRepRg': ('RG do representante da PQ', 'pq_rep_rg', lambda v: ler_texto(v, 'RG do representante da PQ', 30)),
+        'pqRepNacionalidade': ('Nacionalidade do representante da PQ', 'pq_rep_nacionalidade', lambda v: ler_texto(v, 'nacionalidade do representante da PQ', 50)),
+        'pqRepEstadoCivil': ('Estado civil do representante da PQ', 'pq_rep_estado_civil', lambda v: ler_texto(v, 'estado civil do representante da PQ', 30)),
+        'pqRepEndereco': ('Endereço do representante da PQ', 'pq_rep_endereco', lambda v: ler_texto(v, 'endereço do representante da PQ', 200)),
+        # padroes do contrato (aba Contratos)
+        'contratoJurosMora': ('Contrato: juros de mora', 'contrato_juros_mora', lambda v: ler_numero(v, 'Juros de mora', 0, 20, 4)),
+        'contratoMulta': ('Contrato: multa', 'contrato_multa', lambda v: ler_numero(v, 'Multa contratual', 0, 20, 4)),
+        'contratoHonorarios': ('Contrato: honorários', 'contrato_honorarios', lambda v: ler_numero(v, 'Honorários', 0, 30, 4)),
+        'contratoPrazoReembolso': ('Contrato: prazo de reembolso', 'contrato_prazo_reembolso',
+                                   lambda v: int(ler_numero(v, 'Prazo de reembolso (dias)', 1, 365, 0))),
+        'contratoVias': ('Contrato: vias', 'contrato_vias', lambda v: int(ler_numero(v, 'Número de vias', 1, 10, 0))),
+        'contratoCidade': ('Contrato: cidade', 'contrato_cidade', lambda v: ler_texto(v, 'a cidade do contrato', 100, obrigatorio=True)),
+        'esc': ('Fozesc é ESC', 'esc', lambda v: v is True or str(v).lower() in ('true', '1', 'sim')),
+        'pqEsc': ('PQ é ESC', 'pq_esc', lambda v: v is True or str(v).lower() in ('true', '1', 'sim')),
         'taxaPadrao': ('Taxa Mensal', 'default_monthly_rate', lambda v: ler_numero(v, 'Taxa padrão', 0, 100, 4)),
         'diasCompensacaoPadrao': ('Dias Comp.', 'default_compensation_days',
                                   lambda v: int(ler_numero(v, 'Dias de compensação', 0, 30, 0))),
@@ -62,6 +88,9 @@ class SettingsService:
         'extension_rate': ('Juros Prorrogação', 'extension_rate', lambda v: ler_numero(v, 'Taxa de prorrogação', 0, 100, 4)),
         'fine_rate': ('Multa Devolução', 'fine_rate', lambda v: ler_numero(v, 'Multa de devolução', 0, 100, 4)),
     }
+
+    DOCUMENTOS = {'cnpj': 'CNPJ da Fozesc', 'pqCnpj': 'CNPJ da PQ', 'repCpf': 'CPF do representante da Fozesc',
+                  'pqRepCpf': 'CPF do representante da PQ'}
 
     def update_settings(self, data):
         if not isinstance(data, dict):
@@ -74,6 +103,12 @@ class SettingsService:
         if not settings:
             settings = CompanySettings()
             db.session.add(settings)
+        # CPF/CNPJ so e' conferido quando muda (o que ja estava gravado nao trava o salvar)
+        for chave, rotulo in self.DOCUMENTOS.items():
+            if chave in novos:
+                valor = novos[chave][2]
+                if valor and valor != getattr(settings, novos[chave][1]) and not documento_valido(valor):
+                    raise ValueError(f'{rotulo} inválido: confira os dígitos')
 
         mudancas = []
         for rotulo, coluna, valor_novo in novos.values():
@@ -96,6 +131,8 @@ class SettingsService:
             'pqNome': s.pq_nome,
             'pqCnpj': s.pq_cnpj,
             'pqEndereco': s.pq_endereco,
+            **{chave: getattr(s, coluna) for chave, (_, coluna, _) in self.CAMPOS.items()
+               if coluna.startswith(('email', 'rep_', 'pq_email', 'pq_telefone', 'pq_rep_', 'esc', 'pq_esc', 'contrato_'))},
             'taxaPadrao': s.default_monthly_rate,
             'diasCompensacaoPadrao': s.default_compensation_days,
             'iof_rate': s.iof_rate,

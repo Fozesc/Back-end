@@ -1,7 +1,8 @@
 from app import db
 from app.models.domain import Check, Operation, Client, Transaction, CompanySettings, CheckExtension, Vale
 from app.services.history_service import bank_key, NOME_CONTA
-from sqlalchemy import func, case, or_, and_, not_
+from app.services.operation_service import EMPRESAS, coluna_empresa
+from sqlalchemy import func, case, or_, and_, not_, true
 from datetime import date, datetime, timedelta
 
 # Relatorio gerencial da tela (impressao/PDF). Antes a tela imprimia numeros FIXOS
@@ -75,23 +76,29 @@ class ReportService:
         ).filter(*filtros).one()
         return float(entradas or 0), float(saidas or 0)
 
-    def gerar_resumo(self, tipo, inicio, fim):
+    def gerar_resumo(self, tipo, inicio, fim, empresa=None):
         if tipo not in TIPOS_RESUMO:
             raise ValueError(f"Tipo de relatório inválido: {tipo}")
         d1, d2 = self._periodo(inicio, fim)
+        # o caixa e' um so: o resumo geral e' sempre das duas empresas
+        empresa = empresa if empresa in EMPRESAS and tipo != 'geral' else None
+        emp = (Check.operation_id.in_(db.session.query(Operation.id).filter(coluna_empresa() == empresa))
+               if empresa else true())
 
         if tipo == 'geral':
             corpo = self._resumo_geral(d1, d2)
         elif tipo == 'inadimplencia':
-            corpo = self._resumo_inadimplencia(d1, d2)
+            corpo = self._resumo_inadimplencia(d1, d2, emp)
         else:
-            corpo = self._resumo_lucro(d1, d2)
+            corpo = self._resumo_lucro(d1, d2, emp)
 
         s = CompanySettings.query.first()
         corpo.update({
             'tipo': tipo,
-            'empresa': (s.company_name if s and s.company_name else 'Fozesc'),
-            'cnpj': (s.cnpj if s else None),
+            'empresa': ((s.pq_nome if s and s.pq_nome else 'PQ') if empresa == 'PQ'
+                        else (s.company_name if s and s.company_name else 'Fozesc')),
+            'cnpj': ((s.pq_cnpj if empresa == 'PQ' else s.cnpj) if s else None),
+            'filtro_empresa': empresa,
             'inicio': d1.strftime('%Y-%m-%d'),
             'fim': d2.strftime('%Y-%m-%d'),
             'gerado_em': datetime.now().strftime('%d/%m/%Y %H:%M'),
@@ -262,12 +269,12 @@ class ReportService:
     # ------------------------------------------------------------------ #
     # 2. Demonstrativo de Resultados
     # ------------------------------------------------------------------ #
-    def _resumo_lucro(self, d1, d2):
+    def _resumo_lucro(self, d1, d2, emp=true()):
         # Juros que ENTROU: cheque pago dentro do periodo. E' o mesmo criterio do KPI
         # "Juros de cheques ja pagos" do Dashboard (decisao do Lucas em 15/09/2026).
         recebido = db.session.query(
             func.coalesce(func.sum(Check.interest_amount), 0.0)
-        ).filter(Check.status == 'Pago',
+        ).filter(Check.status == 'Pago', emp,
                  Check.fora_do_calculo.is_(False),
                  Check.payment_date >= d1, Check.payment_date <= d2).scalar() or 0.0
 
@@ -279,11 +286,11 @@ class ReportService:
             func.coalesce(func.sum(func.coalesce(Check.original_amount, Check.amount)), 0.0),
             func.count(func.distinct(Operation.id)),
         ).select_from(Check).join(Operation, Check.operation_id == Operation.id)\
-         .filter(Operation.operation_date >= d1, Operation.operation_date <= d2,
+         .filter(Operation.operation_date >= d1, Operation.operation_date <= d2, emp,
                  Check.fora_do_calculo.is_(False)).one()
 
         ops_com_cheque = db.session.query(Check.operation_id).filter(
-            Check.fora_do_calculo.is_(False)).distinct()
+            Check.fora_do_calculo.is_(False), emp).distinct()
         iof = db.session.query(
             func.coalesce(func.sum(Operation.iof_amount), 0.0)
         ).filter(Operation.operation_date >= d1, Operation.operation_date <= d2,
@@ -299,13 +306,13 @@ class ReportService:
             por_operacao = db.session.query(
                 quando_op, func.coalesce(func.sum(Check.interest_amount), 0.0)
             ).select_from(Check).join(Operation, Check.operation_id == Operation.id)\
-             .filter(Operation.operation_date >= d1, Operation.operation_date <= d2,
+             .filter(Operation.operation_date >= d1, Operation.operation_date <= d2, emp,
                      Check.fora_do_calculo.is_(False)).group_by(quando_op).all()
 
             quando_pg = func.to_char(Check.payment_date, fmt)
             por_pagamento = db.session.query(
                 quando_pg, func.coalesce(func.sum(Check.interest_amount), 0.0)
-            ).filter(Check.status == 'Pago', Check.fora_do_calculo.is_(False),
+            ).filter(Check.status == 'Pago', Check.fora_do_calculo.is_(False), emp,
                      Check.payment_date >= d1, Check.payment_date <= d2)\
              .group_by(quando_pg).all()
 
@@ -323,7 +330,7 @@ class ReportService:
             Client.name, func.coalesce(func.sum(Check.interest_amount), 0.0)
         ).select_from(Check).join(Operation, Check.operation_id == Operation.id)\
          .join(Client, Operation.client_id == Client.id)\
-         .filter(Operation.operation_date >= d1, Operation.operation_date <= d2,
+         .filter(Operation.operation_date >= d1, Operation.operation_date <= d2, emp,
                  Check.fora_do_calculo.is_(False))\
          .group_by(Client.name)\
          .order_by(func.sum(Check.interest_amount).desc()).limit(LIMITE_TOP).all()
@@ -358,11 +365,11 @@ class ReportService:
     # ------------------------------------------------------------------ #
     # 3. Cheques em atraso
     # ------------------------------------------------------------------ #
-    def _resumo_inadimplencia(self, d1, d2):
+    def _resumo_inadimplencia(self, d1, d2, emp=true()):
         # Aguardando que ja venceu tambem esta em atraso (igual a tela de Titulos)
         vencido = and_(Check.status == 'Aguardando', Check.due_date < datetime.now().date())
         situacao = case((vencido, 'Atrasado'), else_=Check.status)
-        filtros = (or_(Check.status.in_(STATUS_INADIMPLENTE), vencido),
+        filtros = (or_(Check.status.in_(STATUS_INADIMPLENTE), vencido), emp,
                    Check.fora_do_calculo.is_(False),
                    Check.due_date >= d1, Check.due_date <= d2)
 

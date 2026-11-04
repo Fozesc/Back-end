@@ -3,15 +3,27 @@ import math
 import sys
 from app import db
 from app.utils.validacao import ler_data, ler_texto
-from app.models.domain import Operation, Check, Transaction, Client, CompanySettings
+from app.models.domain import Operation, Check, Transaction, Client, CompanySettings, Contrato
 from flask_jwt_extended import get_jwt
 from app.services.audit_service import AuditService
-from sqlalchemy import asc, desc
+from sqlalchemy import asc, desc, func
 from sqlalchemy.orm import joinedload, selectinload
 
 MAX_POR_PAGINA = 100
 TIPOS_TITULO = ('CHEQUE', 'PROMISSORIA')
+# as duas empresas do topo do borderô. PQ e' a do dia a dia (padrao); a Fozesc faz os contratos.
+# Borderô gravado antes da 2.13 (sem empresa) conta como PQ.
 EMPRESAS = ('Fozesc', 'PQ')
+EMPRESA_PADRAO = 'PQ'
+
+
+def coluna_empresa():
+    return func.coalesce(Operation.empresa, EMPRESA_PADRAO)
+
+
+def filtrar_empresa(query, empresa):
+    """So a empresa pedida (a query precisa ter Operation); vazio ou outra coisa = as duas."""
+    return query.filter(coluna_empresa() == empresa) if empresa in EMPRESAS else query
 BORDEROS_POR_PAGINA = 10      # ficha do cliente
 MAX_BORDEROS_POR_PAGINA = 50
 
@@ -124,7 +136,7 @@ class OperationService:
             if not (math.isfinite(taxa) and 0 <= taxa <= 100) or not 0 <= dias_comp <= 30:
                 raise ValueError("Taxa (0 a 100%) ou dias de compensação (0 a 30) inválidos")
             comissao = ler_comissao(data, taxa)
-            empresa = data.get('empresa') or 'Fozesc'
+            empresa = data.get('empresa') or EMPRESA_PADRAO
             if empresa not in EMPRESAS:
                 raise ValueError("Empresa inválida (use Fozesc ou PQ)")
 
@@ -162,6 +174,8 @@ class OperationService:
             iof_diario = float(data.get('iof_diario', config.iof_daily_rate if config else 0.0041) or 0)
             if not (0 <= iof_base <= 10 and 0 <= iof_diario <= 1):
                 raise ValueError("IOF inválido")
+            if iof_ativo:
+                new_operation.iof_base, new_operation.iof_diario = iof_base, iof_diario
 
             # 1o a conta de todos os cheques, depois grava (o valor redondo da parcela vem da tela,
             # no gerador de parcelas; juros e liquido sao sempre a conta exata)
@@ -386,7 +400,7 @@ class OperationService:
         if not op:
             return None
         s = CompanySettings.query.first() or CompanySettings()
-        if op.empresa == 'PQ':
+        if (op.empresa or EMPRESA_PADRAO) == 'PQ':
             empresa = {'chave': 'PQ', 'nome': s.pq_nome or 'PQ', 'cnpj': s.pq_cnpj, 'endereco': s.pq_endereco}
         else:
             empresa = {'chave': 'Fozesc', 'nome': s.company_name or 'Fozesc', 'cnpj': s.cnpj, 'endereco': s.address}
@@ -413,7 +427,21 @@ class OperationService:
             'valor_total': float(op.total_face_value or 0), 'juros_total': float(op.total_interest or 0),
             'iof_total': float(op.iof_amount or 0), 'liquido_total': float(op.total_net_value or 0),
             'titulos': titulos,
+            'tem_contrato': db.session.query(Contrato.id).filter_by(operation_id=op.id).first() is not None,
         }
+
+    def mudar_empresa(self, op_id, empresa, usuario):
+        """Corrige a empresa de um borderô (os antigos, gravados antes da 2.13, contam como PQ)."""
+        if empresa not in EMPRESAS:
+            raise ValueError('Empresa inválida (use Fozesc ou PQ)')
+        op = db.session.get(Operation, op_id)
+        if not op:
+            return None
+        antes = op.empresa or f'{EMPRESA_PADRAO} (padrão)'
+        op.empresa = empresa
+        db.session.commit()
+        self.audit.log_action(usuario, 'UPDATE', 'Borderô', f'Borderô #{op.id}: empresa {antes} -> {empresa}')
+        return {'id': op.id, 'empresa': op.empresa}
 
     def _serialize_with_checks(self, op):
         return {

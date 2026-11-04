@@ -10,7 +10,7 @@ service = DashboardService()
 def index():
     period = request.args.get('period', 'meses')
     try:
-        data = service.get_dashboard_data(period)
+        data = service.get_dashboard_data(period, request.args.get('empresa'))
         return jsonify(data)
     except Exception as e:
         print(f"Erro Dashboard: {e}")

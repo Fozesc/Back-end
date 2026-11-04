@@ -18,6 +18,31 @@ class CompanySettings(db.Model):
     pq_nome = db.Column(db.String(100))
     pq_cnpj = db.Column(db.String(20))
     pq_endereco = db.Column(db.String(200))
+    # dados para o contrato: e-mail, representante legal e se e' Empresa Simples de Credito (ESC), de cada empresa
+    email = db.Column(db.String(100))
+    rep_nome = db.Column(db.String(100))
+    rep_cpf = db.Column(db.String(20))
+    rep_rg = db.Column(db.String(30))
+    rep_nacionalidade = db.Column(db.String(50))
+    rep_estado_civil = db.Column(db.String(30))
+    rep_endereco = db.Column(db.String(200))
+    esc = db.Column(db.Boolean, nullable=False, default=True, server_default=db.text('true'))
+    pq_email = db.Column(db.String(100))
+    pq_telefone = db.Column(db.String(20))
+    pq_rep_nome = db.Column(db.String(100))
+    pq_rep_cpf = db.Column(db.String(20))
+    pq_rep_rg = db.Column(db.String(30))
+    pq_rep_nacionalidade = db.Column(db.String(50))
+    pq_rep_estado_civil = db.Column(db.String(30))
+    pq_rep_endereco = db.Column(db.String(200))
+    pq_esc = db.Column(db.Boolean, nullable=False, default=False, server_default=db.text('false'))
+    # padroes do contrato (Ajustes > Contratos): entram em cada contrato novo e da para mudar em cada um
+    contrato_juros_mora = db.Column(db.Float, nullable=False, default=1.0, server_default=db.text('1'))
+    contrato_multa = db.Column(db.Float, nullable=False, default=2.0, server_default=db.text('2'))
+    contrato_honorarios = db.Column(db.Float, nullable=False, default=10.0, server_default=db.text('10'))
+    contrato_prazo_reembolso = db.Column(db.Integer, nullable=False, default=30, server_default=db.text('30'))
+    contrato_vias = db.Column(db.Integer, nullable=False, default=2, server_default=db.text('2'))
+    contrato_cidade = db.Column(db.String(100), default='Foz do Iguaçu')
     
     # Taxas e Cálculos Padrão
     default_monthly_rate = db.Column(db.Float, default=4.0)       # Taxa Padrão Mensal
@@ -89,6 +114,16 @@ class Client(db.Model):
     standard_rate = db.Column(db.Float, default=4.0)
     notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.now)
+    # so para contrato (opcional): pessoa fisica (RG, nacionalidade, estado civil) e o representante legal da empresa
+    rg = db.Column(db.String(30))
+    nacionalidade = db.Column(db.String(50))
+    estado_civil = db.Column(db.String(30))
+    rep_nome = db.Column(db.String(100))
+    rep_cpf = db.Column(db.String(20))
+    rep_rg = db.Column(db.String(30))
+    rep_nacionalidade = db.Column(db.String(50))
+    rep_estado_civil = db.Column(db.String(30))
+    rep_endereco = db.Column(db.String(200))
 
 # --- OPERAÇÃO (BORDERÔ) ---
 class Operation(db.Model):
@@ -119,6 +154,9 @@ class Operation(db.Model):
     empresa = db.Column(db.String(10))
     avalista_nome = db.Column(db.String(100))
     avalista_documento = db.Column(db.String(20))
+    # taxas de IOF usadas no dia (so registro, para o contrato separar IOF adicional e diario)
+    iof_base = db.Column(db.Float)
+    iof_diario = db.Column(db.Float)
     # cliente para operacao
     client = db.relationship('Client', backref=db.backref('operations', lazy=True))
 
@@ -321,6 +359,23 @@ class Folha(db.Model):
 
     def to_dict(self):
         return {'id': self.id, 'titulo': self.titulo, 'conteudo': self.conteudo}
+
+
+# --- CONTRATO DE DESCONTO ---
+# Um por borderô. `dados` guarda o contrato como foi conferido/editado na tela (partes, representantes,
+# titulos, encargos, testemunhas), para baixar o mesmo PDF depois e lembrar o representante na proxima vez.
+class Contrato(db.Model):
+    __tablename__ = 'contratos'
+    id = db.Column(db.Integer, primary_key=True)
+    operation_id = db.Column(db.Integer, db.ForeignKey('operations.id', ondelete='CASCADE'), nullable=False, unique=True)
+    dados = db.Column(db.JSON, nullable=False)
+    atualizado_por = db.Column(db.String(100))
+    atualizado_em = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    # marcado na lista de contratos (com a senha): saber quem ja assinou sem procurar o papel
+    assinado = db.Column(db.Boolean, nullable=False, default=False, server_default=db.text('false'))
+    assinado_em = db.Column(db.DateTime)
+    assinado_por = db.Column(db.String(100))
+    operation = db.relationship('Operation')
 
 
 # --- GUIAS ---

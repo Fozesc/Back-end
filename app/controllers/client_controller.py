@@ -1,8 +1,8 @@
 from flask import Blueprint, jsonify, request
 from app import db
-from app.services.client_service import ClientService
+from app.services.client_service import DADOS_CONTRATO, ClientService
 from flask_jwt_extended import jwt_required
-from app.controllers import limite_senha
+from app.controllers import limite_senha, so_admin
 
 bp = Blueprint('clients', __name__, url_prefix='/api/clients')
 service = ClientService()
@@ -29,6 +29,7 @@ def show(id):
         'standard_rate': client.standard_rate, 'notes': client.notes,
         'email': client.email, 'address': client.address, 'neighborhood': client.neighborhood,
         'city': client.city, 'state': client.state, 'zip_code': client.zip_code,
+        **{campo: getattr(client, campo) for campo in DADOS_CONTRATO},
         'reputacao': stats['reputacao'], 'valor_em_aberto': stats['total_debt'],
         'valor_devolvido': stats['devolvido'], 'cheques_totais': stats['total_count'],
     })
@@ -52,9 +53,24 @@ def update(id):
     if client: return jsonify({'message': 'Atualizado'})
     return jsonify({'error': 'Cliente não encontrado'}), 404
 
+@bp.route('/<int:id>', methods=['DELETE'])
+@limite_senha
+@so_admin
+def delete(id):
+    """Apaga o cliente sem borderô. Exige a senha no corpo."""
+    try:
+        r = service.delete(id, (request.get_json(silent=True) or {}).get('senha'))
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if r is None:
+        return jsonify({'error': 'Cliente não encontrado'}), 404
+    return jsonify(r)
+
 @bp.route('/merge', methods=['POST'])
 @limite_senha
-@jwt_required()
+@so_admin
 def merge():
     """Junta dois cadastros do mesmo cliente. Exige a senha de quem esta logado."""
     data = request.get_json(silent=True) or {}

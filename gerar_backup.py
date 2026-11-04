@@ -94,7 +94,7 @@ ABAS = {
                COALESCE(c.original_amount, c.amount) AS "Valor de face", c.amount AS "Valor hoje",
                c.interest_amount AS "Juros", c.net_amount AS "Líquido", {SITUACAO} AS "Situação",
                c.payment_date AS "Pago em", c.paid_amount AS "Valor pago", c.payment_method AS "Forma de pagamento",
-               o.id AS "Borderô", o.operation_date AS "Data do borderô",
+               o.id AS "Borderô", o.operation_date AS "Data do borderô", COALESCE(o.empresa, 'PQ') AS "Empresa",
                CASE WHEN c.fora_do_calculo THEN 'sim' ELSE '' END AS "Fora do cálculo", c.id AS "Id"
         FROM checks c JOIN operations o ON o.id = c.operation_id LEFT JOIN clients cl ON cl.id = o.client_id
         ORDER BY c.due_date, c.id""",
@@ -114,9 +114,17 @@ ABAS = {
                (SELECT COUNT(*) FROM checks c WHERE c.operation_id = o.id) AS "Títulos",
                o.total_face_value AS "Valor de face", o.total_interest AS "Juros", o.iof_amount AS "IOF",
                o.comissao_valor AS "Comissão", o.total_net_value AS "Pago ao cliente", o.monthly_rate AS "Taxa (%)",
-               o.account_source AS "Conta", o.status AS "Situação", o.notes AS "Observação"
+               o.account_source AS "Conta", COALESCE(o.empresa, 'PQ') AS "Empresa", o.avalista_nome AS "Avalista",
+               o.status AS "Situação", o.notes AS "Observação"
         FROM operations o LEFT JOIN clients cl ON cl.id = o.client_id
         ORDER BY o.operation_date, o.id""",
+    "Contratos": """
+        SELECT o.id AS "Borderô", COALESCE(cl.name, o.client_name_snapshot) AS "Cliente", COALESCE(o.empresa, 'PQ') AS "Empresa",
+               o.operation_date AS "Data do borderô", o.total_face_value AS "Valor",
+               CASE WHEN k.assinado THEN 'sim' ELSE 'não' END AS "Assinado", k.assinado_em AS "Assinado em",
+               k.assinado_por AS "Marcado por", k.atualizado_em AS "Contrato atualizado em", k.atualizado_por AS "Atualizado por"
+        FROM contratos k JOIN operations o ON o.id = k.operation_id LEFT JOIN clients cl ON cl.id = o.client_id
+        ORDER BY o.id""",
     "Caixa": """
         SELECT t.date AS "Data", t.description AS "Descrição", t.category AS "Categoria", t.origin AS "Conta",
                CASE WHEN t.type = 'entrada' THEN ABS(t.amount) END AS "Entrada",

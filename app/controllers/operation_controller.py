@@ -1,7 +1,10 @@
 from flask import Blueprint, request, jsonify
 from app.services.operation_service import OperationService
-from flask_jwt_extended import jwt_required
+from flask_jwt_extended import get_jwt, jwt_required
 from app.schemas.operation_schema import operation_schema, operations_schema
+from app.controllers.contrato_controller import gerar_contrato_se_faltar
+from app.controllers import limite_senha, so_admin
+from app.services.check_service import CheckService
 
 bp = Blueprint('operations', __name__, url_prefix='/api/operations')
 service = OperationService()
@@ -11,7 +14,8 @@ service = OperationService()
 def store():
     try:
         new_operation = service.create_operation(request.json)
-        return jsonify(operation_schema.dump(new_operation)), 201
+        contrato = gerar_contrato_se_faltar(new_operation, get_jwt().get('name', 'Sistema'))
+        return jsonify({**operation_schema.dump(new_operation), 'contrato_gerado': contrato}), 201
 
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
@@ -52,6 +56,46 @@ def get_by_client(client_id):
 def documento(op_id):
     """Dados do borderô e das promissorias para baixar o PDF de novo (ficha do cliente, titulo, borderô)."""
     dados = service.documento(op_id)
+    if dados is None:
+        return jsonify({'error': 'Borderô não encontrado'}), 404
+    return jsonify(dados)
+
+
+@bp.route('/<int:op_id>/empresa', methods=['PUT'])
+@jwt_required()
+def mudar_empresa(op_id):
+    """Empresa do borderô (Fozesc ou PQ): corrige os antigos e o que foi lancado na empresa errada."""
+    try:
+        r = service.mudar_empresa(op_id, (request.get_json(silent=True) or {}).get('empresa'), get_jwt().get('name', 'Sistema'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if r is None:
+        return jsonify({'error': 'Borderô não encontrado'}), 404
+    from app import db
+    from app.models.domain import Operation
+    r['contrato_gerado'] = gerar_contrato_se_faltar(db.session.get(Operation, op_id), get_jwt().get('name', 'Sistema'))
+    return jsonify(r)
+
+
+@bp.route('/<int:op_id>/exclusao', methods=['GET'])
+@jwt_required()
+def previa_exclusao(op_id):
+    """O que apagar o borderô inteiro muda no caixa. Nada e' gravado."""
+    dados = CheckService().delete_bordero(op_id, simular=True)
+    if dados is None:
+        return jsonify({'error': 'Borderô não encontrado'}), 404
+    return jsonify(dados)
+
+
+@bp.route('/<int:op_id>', methods=['DELETE'])
+@limite_senha
+@so_admin
+def apagar(op_id):
+    """Apaga o borderô e todos os titulos dele, desfazendo no caixa. Exige a senha no corpo."""
+    try:
+        dados = CheckService().delete_bordero(op_id, (request.get_json(silent=True) or {}).get('senha'))
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
     if dados is None:
         return jsonify({'error': 'Borderô não encontrado'}), 404
     return jsonify(dados)

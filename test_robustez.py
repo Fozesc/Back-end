@@ -117,9 +117,10 @@ def main():
             s = CompanySettings.query.first()
             assert s is None or s.default_monthly_rate != 5, 'um campo ruim nao deixa o resto meio gravado'
         r = http.put(S, headers=admin, json={'taxaPadrao': '4,5', 'diasCompensacaoPadrao': 3, 'iof_rate': 0.38,
-                                              'nomeEmpresa': 'Fozesc', 'cnpj': '1' * 40})
+                                              'nomeEmpresa': 'Fozesc', 'cnpj': '  11.222.333/0001-81  '})
         assert r.status_code == 200, r.data
-        assert (r.get_json()['taxaPadrao'], r.get_json()['diasCompensacaoPadrao'], len(r.get_json()['cnpj'])) == (4.5, 3, 20)
+        assert (r.get_json()['taxaPadrao'], r.get_json()['diasCompensacaoPadrao'], r.get_json()['cnpj']) == (4.5, 3, '11.222.333/0001-81')
+        assert http.put(S, headers=admin, json={'cnpj': '1' * 40}).status_code == 400, 'CNPJ com digito errado e recusado'
         for ruim in ({'capital_social': 'abc'}, {'capital_social': -5}, {'saldo_inicial_bb': '1.234,56'}):
             assert http.put('/api/transactions/initial-balances', headers=admin, json=ruim).status_code == 400, ruim
         r = http.put('/api/transactions/initial-balances', headers=admin, json={'capital_social': 1000, 'saldo_inicial_bb': -50})
@@ -132,15 +133,15 @@ def main():
                              ({'name': 'Ana', 'credit_limit': 'muito'}, 'Limite'), ({'name': 'Ana', 'credit_limit': -1}, 'Limite')):
             r = http.post(C, headers=op, json=ruim)
             assert r.status_code == 400 and trecho in r.get_json()['error'], (ruim, r.data)
-        r = http.post(C, headers=op, json={'name': 'Ana Souza', 'document': '123.456.789-00', 'credit_limit': '', 'standard_rate': ''})
+        r = http.post(C, headers=op, json={'name': 'Ana Souza', 'document': '529.982.247-25', 'credit_limit': '', 'standard_rate': ''})
         assert r.status_code == 201, r.data
         ana = r.get_json()['id']
-        r = http.post(C, headers=op, json={'name': 'Ana S.', 'document': '12345678900'})
+        r = http.post(C, headers=op, json={'name': 'Ana S.', 'document': '52998224725'})
         assert r.status_code == 400 and 'Ana Souza' in r.get_json()['error'], 'mesmo CPF escrito diferente'
-        r = http.post(C, headers=op, json={'name': 'Bia', 'document': '98765432100'})
+        r = http.post(C, headers=op, json={'name': 'Bia', 'document': '11144477735'})
         bia = r.get_json()['id']
-        assert http.put(f'{C}/{ana}', headers=op, json={'name': 'Ana Souza', 'document': '123.456.789-00', 'phone': '45 9'}).status_code == 200
-        assert http.put(f'{C}/{bia}', headers=op, json={'document': '123.456.789-00'}).status_code == 400
+        assert http.put(f'{C}/{ana}', headers=op, json={'name': 'Ana Souza', 'document': '529.982.247-25', 'phone': '45 9'}).status_code == 200
+        assert http.put(f'{C}/{bia}', headers=op, json={'document': '529.982.247-25'}).status_code == 400
         assert http.put(f'{C}/99999', headers=op, json={'name': 'x'}).status_code == 404
         with app.app_context():
             a = db.session.get(Client, ana)
