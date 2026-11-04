@@ -6,7 +6,7 @@ from app.utils.validacao import ler_data, ler_texto
 from app.models.domain import Operation, Check, Transaction, Client, CompanySettings, Contrato
 from flask_jwt_extended import get_jwt
 from app.services.audit_service import AuditService
-from sqlalchemy import asc, desc, func
+from sqlalchemy import asc, desc, func, text
 from sqlalchemy.orm import joinedload, selectinload
 
 MAX_POR_PAGINA = 100
@@ -19,6 +19,13 @@ EMPRESA_PADRAO = 'PQ'
 
 def coluna_empresa():
     return func.coalesce(Operation.empresa, EMPRESA_PADRAO)
+
+
+def proximo_numero():
+    """O id que o proximo borderô vai ganhar, lido da sequencia sem chamar nextval (que gastaria o numero)."""
+    seq = db.session.execute(text("SELECT pg_get_serial_sequence('operations', 'id')")).scalar()
+    prox = db.session.execute(text(f"SELECT CASE WHEN is_called THEN last_value + 1 ELSE last_value END FROM {seq}")).scalar()
+    return max(int(prox), (db.session.query(func.max(Operation.id)).scalar() or 0) + 1)
 
 
 def filtrar_empresa(query, empresa):
@@ -113,7 +120,9 @@ class OperationService:
     def __init__(self):
         self.audit = AuditService()
 
-    def create_operation(self, data):
+    def create_operation(self, data, simular=False):
+        """Grava o borderô. simular=True monta tudo igual e so da flush (quem chama desfaz com rollback), com o
+        numero que o proximo borderô vai ganhar sem gastar a sequencia: a previa do contrato nao pula numero."""
         try:
             client = Client.query.get(data['client_id'])
             if not client:
@@ -157,6 +166,8 @@ class OperationService:
                 total_net_value=0.0
             )
             
+            if simular:
+                new_operation.id = proximo_numero()
             db.session.add(new_operation)
             db.session.flush()
 
@@ -303,6 +314,9 @@ class OperationService:
             else:
                 db.session.add(saidas[0])
 
+            if simular:
+                db.session.flush()
+                return new_operation
             db.session.commit()
 
             try:

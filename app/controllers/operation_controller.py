@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 from app.services.operation_service import OperationService
 from flask_jwt_extended import get_jwt, jwt_required
 from app.schemas.operation_schema import operation_schema, operations_schema
-from app.controllers.contrato_controller import gerar_contrato_se_faltar
+from app.controllers.contrato_controller import gerar_contrato_se_faltar, previa_contrato
 from app.controllers import limite_senha, so_admin
 from app.services.check_service import CheckService
 
@@ -22,6 +22,24 @@ def store():
     except Exception as e:
         print(f"Erro no Controller: {e}")
         return jsonify({'error': 'Erro interno ao processar borderô'}), 500
+
+
+@bp.route('/previa', methods=['POST'])
+@jwt_required()
+def previa():
+    """Contrato e borderô da operação ANTES de efetivar (borderô da Fozesc): monta o borderô como o Efetivar
+    montaria, tira os documentos e desfaz tudo. Nada e' gravado e o numero do borderô nao e' gasto."""
+    from app import db
+    try:
+        op = service.create_operation(request.get_json(silent=True) or {}, simular=True)
+        return jsonify(previa_contrato(op, get_jwt().get('name', 'Sistema')))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        print(f"Erro na previa do borderô: {e}")
+        return jsonify({'error': 'Não foi possível montar a prévia do contrato'}), 500
+    finally:
+        db.session.rollback()
 
 
 @bp.route('', methods=['GET'])

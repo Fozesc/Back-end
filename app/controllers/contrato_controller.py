@@ -215,6 +215,13 @@ def gerar_contrato_se_faltar(op, quem):
         return False
 
 
+def previa_contrato(op, quem):
+    """Contrato e borderô da operação de um borderô montado com simular=True (antes de efetivar). Quem chama desfaz."""
+    operacao = _resumo_operacao(op)
+    operacao['operador'] = operacao['operador'] or str(quem)
+    return {'dados': _sugestao(op), 'operacao': operacao, 'bordero': _bordero(op)}
+
+
 def _tem_atraso():
     """Borderô com titulo para a notificacao de cobranca (a mesma regra da /cobranca): sem pagar e vencido,
     devolvido ou no juridico."""
